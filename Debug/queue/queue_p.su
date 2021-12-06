@@ -1,0 +1,4 @@
+queue_p.c:46:9:Q_push_data_to_queue	16	static
+queue_p.c:60:9:Q_get_data_from_queue	24	static
+queue_p.c:77:9:Q_clear_queue	16	static
+queue_p.c:86:9:Q_get_number_items	16	static
