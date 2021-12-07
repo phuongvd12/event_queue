@@ -5,20 +5,14 @@
  *      Author: lenovo
  */
 
-
-#include "event_driven.h"
-#include "sim_command.h"
-#include "elster.h"
 #include "main_app.h"
 #include "stm32l4xx_hal.h"
 #include "gpio.h"
 #include "iwdg.h"
+#include "myDefine.h"
 
 static sData sUartDebug;
 uint8_t uartDebugBuff[100] = {0};
-/* */
-uint8_t aSimStepBlockLed2[] = { SIM_CMD_CHECK_RSSI, SMI_CMD_GET_IMEI,SIM_CMD_BAUD_RATE};
-uint8_t aSimStepBlockLed3[] = { SIM_CMD_CEREG, SIM_CMD_GET_RTC,SIM_CMD_APN_AUTHEN_1};
 /* */
 static void CheckEventQueue(void);
 static uint8_t f_event_blink_led1_handler(uint8_t event);

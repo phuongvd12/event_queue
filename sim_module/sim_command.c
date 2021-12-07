@@ -4,19 +4,17 @@
  *  Created on: Nov 26, 2021
  *      Author: lenovo
  */
-
-#include "sim_command.h"
-#include "event_driven.h"
 #include "string.h"
 #include "queue_p.h"
+#include "myDefine.h"
 
 #define SIM_CMD_RETRY	3
 #define SIM_CMD_FREQ	500
 #define SIM_CMD_TIMEOUT	10000
 /* define static variable */
-static uint8_t uartSimBuffReceive[100] = {0};
-static uint8_t rx_buff[1] = {0};
-static sData sUartSim;
+uint8_t uartSimBuffReceive[100] = {0};
+uint8_t sim_rx_buff[1] = {0};
+sData sUartSim;
 static uint8_t numRetry;
 //
 static uint8_t aSimStepBlockConnect[] = {
@@ -26,8 +24,6 @@ static uint8_t aSimStepBlockConnect[] = {
 	SIM_CMD_TCP_NETOPEN, SIM_CMD_TCP_CONNECT, SIM_CMD_TCP_SEND_MESSAGE
 };
 /* */
-extern uint8_t uartDebugBuff[100];
-extern sEvent_struct s_event_sub_handler[];
 extern sQueue_Struct_TypeDef QueueSimStep;
 /* define static functions */
 static uint8_t at_callback_success(uint8_t *uart_string);
@@ -50,7 +46,7 @@ sEvent_struct s_event_sim_handler[] =
 //	{ EVENT_SIM_SEND_MESSAGE, 		0, 0, 10, 				fevent_sim_turn_on_handler },
 };
 
-sCommand_Sim_Struct aSimStep[] =
+const sCommand_Sim_Struct aSimStep[] =
 {
 	{	SIM_CMD_AT,				"AT\r\n", 		 	"OK", 			at_callback_success,   at_callback_failure	},
 	{	SIM_CMD_ECHO,			"ATE1\r\n", 	 	"OK", 			at_callback_success,   at_callback_failure	},
@@ -84,7 +80,7 @@ sCommand_Sim_Struct aSimStep[] =
 	{	SIM_CMD_END, 			NULL,		NULL,	at_callback_success,   at_callback_failure},
 };
 
-sCommand_Sim_Struct aSimUrc[] =
+const sCommand_Sim_Struct aSimUrc[] =
 {
 	{SIM_URC_RESET_SIM900,		NULL, 	"NORMAL POWER DOWN", 		at_callback_success,   at_callback_failure	},// OK
 	{SIM_URC_ALREADY_CONNECT, 	NULL, 	"ALREADY CONNECT",   		at_callback_success,   at_callback_failure	},
@@ -101,7 +97,7 @@ void SimInit(void)
 	sUartSim.data = &uartSimBuffReceive[0];
 	sUartSim.length = 0;
 
-	HAL_UART_Receive_IT(&uart_sim, rx_buff, 1);
+	HAL_UART_Receive_IT(&uart_sim, sim_rx_buff, 1);
 	fevent_active(s_event_sim_handler, EVENT_SIM_TURN_ON);
 }
 
@@ -194,6 +190,7 @@ static uint8_t fevent_sim_at_send_ok_handler(uint8_t event)
 	fevent_disable(s_event_sim_handler, event);
 
 	s_event_sim_handler[EVENT_SIM_AT_SEND].e_period = SIM_CMD_FREQ;
+	s_event_sim_handler[EVENT_SIM_AT_SEND].e_systick = HAL_GetTick();
 
 	fGetSimStepFromQueue(1); // clear AT from queue to complete
 
@@ -343,18 +340,4 @@ uint8_t Sim_Check_Response(uint8_t sim_step) // alternative by ring buffer
 	return 1;
 }
 
-/* callback uart */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-	if (huart->Instance == uart_sim.Instance)
-	{
-		*(sUartSim.data+sUartSim.length) = rx_buff[0];
-		sUartSim.length++;
-		if (sUartSim.length >= sizeof(uartSimBuffReceive))
-		{
-			sUartSim.length = 0;
-		}
-		HAL_UART_Receive_IT(&uart_sim, rx_buff, 1);
-	}
-	fevent_enable(s_event_sim_handler, EVENT_SIM_UART_RECEIVE);
-}
+

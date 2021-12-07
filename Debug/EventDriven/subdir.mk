@@ -5,13 +5,16 @@
 
 # Add inputs and outputs from these tool invocations to the build variables 
 C_SRCS += \
-../EventDriven/event_driven.c 
+../EventDriven/event_driven.c \
+../EventDriven/myUart.c 
 
 OBJS += \
-./EventDriven/event_driven.o 
+./EventDriven/event_driven.o \
+./EventDriven/myUart.o 
 
 C_DEPS += \
-./EventDriven/event_driven.d 
+./EventDriven/event_driven.d \
+./EventDriven/myUart.d 
 
 
 # Each subdirectory must supply rules for building sources it contributes

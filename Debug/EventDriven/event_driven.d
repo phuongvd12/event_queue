@@ -1,7 +1,5 @@
 EventDriven/event_driven.o: ../EventDriven/event_driven.c \
- ../EventDriven/event_driven.h \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/sim_module/sim_command.h \
- ../Core/Inc/usart.h ../Core/Inc/main.h \
+ D:/Embedded/DCU/2021/PhuongNov21/event_queue/App/main_app.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal.h \
  ../Core/Inc/stm32l4xx_hal_conf.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_rcc.h \
@@ -40,17 +38,14 @@ EventDriven/event_driven.o: ../EventDriven/event_driven.c \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_tim_ex.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_uart.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_uart_ex.h \
+ ../Core/Inc/gpio.h ../Core/Inc/main.h ../Core/Inc/iwdg.h \
+ ../EventDriven/myDefine.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/meter/elster.h \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/App/main_app.h \
- ../Core/Inc/gpio.h ../Core/Inc/iwdg.h
+ D:/Embedded/DCU/2021/PhuongNov21/event_queue/sim_module/sim_command.h \
+ ../Core/Inc/usart.h ../EventDriven/event_driven.h \
+ ../EventDriven/myUart.h
 
-../EventDriven/event_driven.h:
-
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/sim_module/sim_command.h:
-
-../Core/Inc/usart.h:
-
-../Core/Inc/main.h:
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/App/main_app.h:
 
 ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal.h:
 
@@ -128,10 +123,20 @@ D:/Embedded/DCU/2021/PhuongNov21/event_queue/sim_module/sim_command.h:
 
 ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_uart_ex.h:
 
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/meter/elster.h:
-
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/App/main_app.h:
-
 ../Core/Inc/gpio.h:
 
+../Core/Inc/main.h:
+
 ../Core/Inc/iwdg.h:
+
+../EventDriven/myDefine.h:
+
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/meter/elster.h:
+
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/sim_module/sim_command.h:
+
+../Core/Inc/usart.h:
+
+../EventDriven/event_driven.h:
+
+../EventDriven/myUart.h:

@@ -30,4 +30,5 @@ static void AppInit(void)
 {
 	Event_Init();
 	SimInit();
+	MeterInit();
 }

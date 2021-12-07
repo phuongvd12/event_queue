@@ -10,9 +10,6 @@
 
 #include "usart.h"
 
-#define uart_debug	huart1
-#define uart_sim	huart3
-
 #define SIM_PW_PORT1   ON_OFF_SIM_GPIO_Port
 #define SIM_PW_PIN1    ON_OFF_SIM_Pin
 #define SIM_PW_OFF1    HAL_GPIO_WritePin(SIM_PW_PORT1,SIM_PW_PIN1,GPIO_PIN_RESET)
@@ -83,14 +80,8 @@ typedef struct
 	fp_at_callback	callback_failure;
 }sCommand_Sim_Struct; // it is not a declaration, it is a new type of data
 
-typedef struct
-{
-	uint8_t *data;
-	uint16_t length;
-}sData;
-
 /* external */
-extern sCommand_Sim_Struct aSimStep[];
+extern const sCommand_Sim_Struct aSimStep[];
 
 /* define function */
 void SimInit(void);

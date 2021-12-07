@@ -1,5 +1,6 @@
-meter/elster.o: ../meter/elster.c \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/queue/queue_p.h \
+EventDriven/myUart.o: ../EventDriven/myUart.c ../EventDriven/myDefine.h \
+ D:/Embedded/DCU/2021/PhuongNov21/event_queue/meter/elster.h \
+ D:/Embedded/DCU/2021/PhuongNov21/event_queue/sim_module/sim_command.h \
  ../Core/Inc/usart.h ../Core/Inc/main.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal.h \
  ../Core/Inc/stm32l4xx_hal_conf.h \
@@ -39,14 +40,13 @@ meter/elster.o: ../meter/elster.c \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_tim_ex.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_uart.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_uart_ex.h \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/EventDriven/myDefine.h \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/meter/elster.h \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/sim_module/sim_command.h \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/EventDriven/event_driven.h \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/EventDriven/myUart.h \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/EventDriven/myDefine.h
+ ../EventDriven/event_driven.h ../EventDriven/myUart.h
 
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/queue/queue_p.h:
+../EventDriven/myDefine.h:
+
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/meter/elster.h:
+
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/sim_module/sim_command.h:
 
 ../Core/Inc/usart.h:
 
@@ -128,14 +128,6 @@ D:/Embedded/DCU/2021/PhuongNov21/event_queue/queue/queue_p.h:
 
 ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_uart_ex.h:
 
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/EventDriven/myDefine.h:
+../EventDriven/event_driven.h:
 
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/meter/elster.h:
-
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/sim_module/sim_command.h:
-
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/EventDriven/event_driven.h:
-
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/EventDriven/myUart.h:
-
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/EventDriven/myDefine.h:
+../EventDriven/myUart.h:
