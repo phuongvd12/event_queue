@@ -1,0 +1,2550 @@
+#include "stm32f3xx_hal.h"
+#include "stm32f3xx.h"
+#include "variable.h"
+#include "usart.h"
+#include "S25FL216K.h"
+#include "onchipflash.h"
+#include "t_mqtt.h"
+#include "Init_Meter.h"
+#include "Read_Meter.h"
+#include "pushdata.h"
+
+#define UNDER_COMP	0
+#define OVER_COMP	1
+
+uint8_t	 			meterPeriod_Mins=0;
+uint32_t			meterTimeStamp=0;
+ST_TIME_FORMAT 		meterLPTime,*ptrMeterLPTime;
+const truct_String  StrNull = {NULL};
+
+void Connect_Metter_Handle(void)
+{
+	uint8_t i=0;
+	uint8_t ReadIDRetry = 1; // qua 1 lan la bi loi khi sang mat khau moi - chi doc 1 lan
+	HAL_Delay(TIME_DELAY_ERR);
+	HAL_Delay(TIME_DELAY_ERR);
+	HAL_Delay(TIME_DELAY_ERR);
+	MX_USART1_UART_Init();
+	__HAL_UART_ENABLE_IT(&huart1, UART_IT_RXNE);
+		while (ReadIDRetry>0)
+		{
+				Read_Meter_ID_Success = Get_Meter_ID();
+				if (Read_Meter_ID_Success == 1)
+					break;
+				else
+					HAL_Delay(TIME_DELAY_ERR);
+				ReadIDRetry--;
+		}
+		if (Read_Meter_ID_Success == 0)   //Reinit uart1  /**** Check lai o day xem con loi khong ***/
+		{
+			huart1.Instance = USART1;
+			huart1.Init.BaudRate = UART2_BAUR_2;
+			huart1.Init.WordLength = UART2_DATALENGTH;
+			huart1.Init.StopBits = UART_STOPBITS_1;
+			huart1.Init.Parity = UART_PARITY_EVEN;
+			huart1.Init.Mode = UART_MODE_TX_RX;
+			huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+			huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+			huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE ;
+			huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+			HAL_UART_Init(&huart1);
+			Init_UART2();
+			__HAL_UART_ENABLE_IT(&huart1, UART_IT_RXNE);
+			HAL_Delay(TIME_DELAY_ERR);
+			
+			ReadIDRetry = 2;
+			for(i=0;i<8;i++)
+				password[i] = password_backup[i];
+            
+			while (ReadIDRetry>0)
+			{
+					Read_Meter_ID_Success = Get_Meter_ID();
+					if (Read_Meter_ID_Success == 1)
+						break;
+					else
+						HAL_Delay(TIME_DELAY_ERR);
+					ReadIDRetry--;
+			}
+		}
+		if(Read_Meter_ID_Success == 0)
+		{
+			 __disable_irq();
+			 NVIC_SystemReset();
+		}
+}
+
+//---------------------FUNCTION------------------------
+// 
+// Meter genaral function
+//
+void Scale_Meter(truct_String *Payload)
+{
+	uint8_t var;
+	*(Payload->Data_a8 + Payload->Length_u16) = 0xFA;
+	Payload->Length_u16++;
+	*(Payload->Data_a8 + Payload->Length_u16) = MeterScaleSize;  // Length
+	Payload->Length_u16++;
+	for (var = 0; var < MeterScaleSize; ++var) {
+		*(Payload->Data_a8 + Payload->Length_u16) = MeterScale[var];
+		Payload->Length_u16++;
+	}
+}
+
+void ELSTER_Mess_Checksum(void)
+{
+	uint8_t	GenCheckSum=0;
+	uint8_t	i=0;
+	
+	for (i=1;i<UART1_Control.Mess_Length_ui16;i++)
+		GenCheckSum = GenCheckSum ^ UART1_Receive_Buff[i];
+	
+	if (GenCheckSum == UART1_Receive_Buff[UART1_Control.Mess_Length_ui16])
+		UART1_Control.Mess_Status_ui8 = 2;
+	else
+		UART1_Control.Mess_Status_ui8 = 4;
+}
+
+void Reset_UART1_State (void)
+{
+	UART1_Control.Mess_Pending_ui8 = 0;
+	UART1_Control.Mess_Length_ui16 = 0;
+	UART1_Control.Mess_Status_ui8 = 0;	
+}
+
+void GetUART2Data(void)
+{
+	uint8_t	temp_recieve = 0;
+
+	switch (UART1_Control.Mode_ui8)
+	{
+		case 0:
+			if (UART1_Control.Mess_Pending_ui8 == 0)
+			{
+				temp_recieve = huart1.Instance->RDR & 0x00FF;
+				UART1_Receive_Buff[UART1_Control.Mess_Length_ui16] = temp_recieve;
+				
+				if (temp_recieve == 0x03)
+				{
+					UART1_Control.Mess_Pending_ui8 = 2;
+					UART1_Control.Mess_Length_ui16++;
+				}
+				else if (temp_recieve == 0x06)
+				{
+					UART1_Control.Mess_Length_ui16++;
+					UART1_Control.Mess_Pending_ui8 = 1;
+					UART1_Control.Mess_Status_ui8 = 1;
+					osSemaphoreRelease(bsUART2PendingMessHandle);
+				}
+				else
+				{
+					UART1_Control.Mess_Length_ui16++;
+					if (UART1_Control.Mess_Length_ui16 > 254)	
+						UART1_Control.Mess_Length_ui16 = 0;
+				}
+			}
+			else if (UART1_Control.Mess_Pending_ui8 == 2)
+			{
+				temp_recieve = huart1.Instance->RDR & 0x00FF;
+				UART1_Receive_Buff[UART1_Control.Mess_Length_ui16] = temp_recieve;
+				UART1_Control.Mess_Pending_ui8 = 1;
+				UART1_Control.Mess_Status_ui8 = 1;
+				osSemaphoreRelease(bsUART2PendingMessHandle);
+			}
+			else
+				temp_recieve = huart1.Instance->RDR & 0x00FF;
+			break;
+		case 1:
+			if (UART1_Control.Mess_Pending_ui8 != 1)
+			{
+				temp_recieve = huart1.Instance->RDR & 0x00FF;
+				UART1_Receive_Buff[UART1_Control.Mess_Length_ui16] = temp_recieve;
+				UART1_Control.Mess_Length_ui16++;
+				
+				switch (Meter_Handshake.Step_ui8)
+				{
+					case 1:
+						if (temp_recieve == 0x0A)
+						{
+							UART1_Control.Mess_Pending_ui8 = 1;
+							UART1_Control.Mess_Status_ui8 = 1;
+							osSemaphoreRelease(bsUART2PendingMessHandle);							
+						}
+						break;
+					case 3:
+						if (UART1_Control.Mess_Pending_ui8 == 2)
+						{
+							UART1_Control.Mess_Pending_ui8 = 1;
+							UART1_Control.Mess_Status_ui8 = 1;
+							osSemaphoreRelease(bsUART2PendingMessHandle);						
+						}				
+						if (temp_recieve == 0x03)
+						{
+							UART1_Control.Mess_Pending_ui8 = 2;
+						}
+						break;
+					case 5:
+						if (temp_recieve == 0x06)
+						{
+							UART1_Control.Mess_Pending_ui8 = 1;
+							UART1_Control.Mess_Status_ui8 = 1;
+							osSemaphoreRelease(bsUART2PendingMessHandle);
+						}							
+						break;
+					default:
+						break;
+				}
+			}
+			else
+				temp_recieve = huart1.Instance->RDR & 0x00FF;
+			break;
+		default:
+			break;
+	}
+}
+
+uint8_t ELSTER_Handshake_Handle (void)
+{
+	uint8_t i=0,mReVal=0;
+	uint8_t	temp_checksum = 0;
+    
+	Init_Meter_Info_Struct();
+	Init_Meter_LProf_Struct();
+    Init_Meter_Event_Struct();
+    Init_Meter_Billing_Struct();
+    Init_Meter_Alert_Struct();
+    
+	Init_Meter_Handshake();
+	Reset_UART1_State();
+	UART1_Control.Mode_ui8 = 1;
+	Meter_Handshake.Reading_ui8 = 1;
+	
+	while (Meter_Handshake.Reading_ui8 == 1)
+	{
+		switch (Meter_Handshake.Step_ui8)
+		{
+			case 0:	//Send Handshake 1
+				Meter_Handshake.Step_ui8++;
+				osDelay(Meter_Delay_ms);
+				HAL_UART_Transmit(&huart1,&ELSTER_Handshake1[0],5,100);
+				break;
+			case 1:
+				if (osSemaphoreWait(bsUART2PendingMessHandle,5000) == osOK)
+				{
+					if ((UART1_Receive_Buff[0]==0xAF)&&(UART1_Receive_Buff[21]==0x8D))
+					{
+						Meter_Handshake.Step_ui8++;
+						Reset_UART1_State();
+					}
+					else
+					{
+						Meter_Handshake.Step_ui8 = 6;
+						Meter_Handshake.Error_ui8 = 1;
+					}
+				}
+				else
+				{
+					Meter_Handshake.Step_ui8 = 6;
+					Meter_Handshake.Error_ui8 = 2;					
+				}
+				break;
+			case 2:	//Send Handshake 2
+				Meter_Handshake.Step_ui8++;
+				osDelay(Meter_Delay_ms);
+				HAL_UART_Transmit(&huart1,&ELSTER_Handshake2[0],6,100);	
+				break;
+			case 3:
+				if (osSemaphoreWait(bsUART2PendingMessHandle,5000) == osOK)
+				{
+					UART1_Control.Mess_Length_ui16--;
+					ELSTER_Mess_Checksum();
+					if (UART1_Control.Mess_Status_ui8 == 2)
+					{
+						Meter_Handshake.Step_ui8++;
+						Reset_UART1_State();						
+					}
+					else
+					{
+						Meter_Handshake.Step_ui8 = 6;
+						Meter_Handshake.Error_ui8 = 3;								
+					}
+				}
+				else
+				{
+					Meter_Handshake.Step_ui8 = 6;
+					Meter_Handshake.Error_ui8 = 4;					
+				}				
+				break;
+			case 4:	//Encrypt pass
+				//Encrypt pass
+				for (i=0;i<16;i++)
+					ELSTER_Hs_inbuff[i] = UART1_Receive_Buff[i+5];						
+				Encryptpass(ELSTER_Hs_inbuff,ELSTER_Hs_outbuff);
+				//Create message to send
+				for (i=0;i<16;i++)
+					ELSTER_Handshake3[i+5] = ELSTER_Hs_outbuff[i];
+				for (i=1;i<23;i++)
+					temp_checksum = temp_checksum ^ ELSTER_Handshake3[i];
+				ELSTER_Handshake3[23] = temp_checksum;
+			
+				//Send message
+				Meter_Handshake.Step_ui8++;
+				osDelay(Meter_Delay_ms);
+				HAL_UART_Transmit(&huart1,&ELSTER_Handshake3[0],24,100);
+				break;
+			case 5:
+				if (osSemaphoreWait(bsUART2PendingMessHandle,5000) == osOK)
+				{
+					Meter_Handshake.Step_ui8++;
+					Reset_UART1_State();
+				}
+				else
+				{
+					Meter_Handshake.Step_ui8 = 6;
+					Meter_Handshake.Error_ui8 = 5;					
+				}
+				break;
+			case 6:
+				Reset_UART1_State();
+				UART1_Control.Mode_ui8 = 0;
+				Meter_Handshake.Reading_ui8 = 0;
+				if (Meter_Handshake.Error_ui8 != 0)
+				{
+					osDelay(Meter_Delay_ms);
+					HAL_UART_Transmit(&huart1,&ELSTER_END[0],5,100);
+					mReVal = 0;
+				}
+				else
+					mReVal = 1;
+				break;
+			default:
+				break;		
+		}
+	}
+	return mReVal;
+}
+
+void Encryptpass(uint8_t *in, uint8_t *out)
+{
+	uint8_t i = 0;
+	uint8_t inbuffer[8];
+	uint8_t outbuffer[8];
+	uint8_t password[8] = {0x4D,0x5F,0x4B,0x48,0x5F,0x44,0x4F,0x43};	
+	///////////////////////////////////////////////////////////
+	for ( i = 0; i < 16; i++)
+	{
+		switch(in[i])
+		{
+			case 0x30:
+				in[i] = 0x00;
+				break;
+			case 0xB1:
+				in[i] = 0x01;
+				break;
+			case 0xB2:
+				in[i] = 0x02;
+				break;
+			case 0x33:
+				in[i] = 0x03;
+				break;
+			case 0xB4:
+				in[i] = 0x04;
+				break;
+			case 0x35:
+				in[i] = 0x05;
+				break;
+			case 0x36:
+				in[i] = 0x06;
+				break;
+			case 0xB7:
+				in[i] = 0x07;
+				break;
+			case 0xB8:
+				in[i] = 0x08;
+				break;
+			case 0x39:
+				in[i] = 0x09;
+				break;
+			case 0x41:
+				in[i] = 0x0A;
+				break;
+			case 0x42:
+				in[i] = 0x0B;
+				break;
+			case 0xC3:
+				in[i] = 0x0C;
+				break;
+			case 0x44:
+				in[i] = 0x0D;
+				break;
+			case 0xC5:
+				in[i] = 0x0E;
+				break;
+			case 0xC6:
+				in[i] = 0x0F;
+				break;
+			default:
+				break;
+		}
+	}
+	///////////////////// conver 16 byte to 8 byte
+	for ( i = 0; i < 8; i++)
+	{
+		inbuffer[i] = (in[i*2] << 4) | in[i*2 + 1];
+		inbuffer[i] = inbuffer[i] ^ password[i];
+	}
+	///////////////////////////////////////////////////////////
+	outbuffer[0] = (uint8_t)(inbuffer[0]+inbuffer[7]);
+	for ( i = 1; i < 8; i++)
+		outbuffer[i] = (uint8_t)(outbuffer[i - 1]+inbuffer[i]);
+	////////////////////// conver 8 byte to 16 byte pass
+	for ( i = 0; i < 8; i++)
+	{
+		out[i*2] = (outbuffer[i] >> 4)&0x0f;
+		out[i*2 + 1] = outbuffer[i]&0x0f;
+	}
+	///////////////////////////////////////////////////////////
+	for ( i = 0; i < 16; i++)
+	{
+		switch(out[i])
+		{
+			case 0x00:
+				out[i] = 0x30;
+				break;
+			case 0x01:
+				out[i] = 0xB1;
+				break;
+			case 0x02:
+				out[i] = 0xB2;
+				break;
+			case 0x03:
+				out[i] = 0x33;
+				break;
+			case 0x04:
+				out[i] = 0xB4;
+				break;
+			case 0x05:
+				out[i] = 0x35;
+				break;
+			case 0x06:
+				out[i] = 0x36;
+				break;
+			case 0x07:
+				out[i] = 0xB7;
+				break;
+			case 0x08:
+				out[i] = 0xB8;
+				break;
+			case 0x09:
+				out[i] = 0x39;
+				break;
+			case 0x0A:
+				out[i] = 0x41;
+				break;
+			case 0x0B:
+				out[i] = 0x42;
+				break;
+			case 0x0C:
+				out[i] = 0xC3;
+				break;
+			case 0x0D:
+				out[i] = 0x44;
+				break;
+			case 0x0E:
+				out[i] = 0xC5;
+				break;
+			case 0x0F:
+				out[i] = 0xC6;
+				break;
+			default:
+				break;
+		}
+	}
+}
+
+void ELSTER_Decode_byte(uint8_t *mBuff,uint8_t startAddr,uint8_t Length)
+{
+	uint8_t i = 0;
+	
+	for (i=0;i<Length;i++)
+	{
+		switch(*(mBuff+startAddr+i))
+		{
+			case 0x30:
+				*(mBuff+startAddr+i) = 0x00;
+				break;
+			case 0xB1:
+				*(mBuff+startAddr+i) = 0x01;
+				break;
+			case 0xB2:
+				*(mBuff+startAddr+i) = 0x02;
+				break;
+			case 0x33:
+				*(mBuff+startAddr+i) = 0x03;
+				break;
+			case 0xB4:
+				*(mBuff+startAddr+i) = 0x04;
+				break;
+			case 0x35:
+				*(mBuff+startAddr+i) = 0x05;
+				break;
+			case 0x36:
+				*(mBuff+startAddr+i) = 0x06;
+				break;
+			case 0xB7:
+				*(mBuff+startAddr+i) = 0x07;
+				break;
+			case 0xB8:
+				*(mBuff+startAddr+i) = 0x08;
+				break;
+			case 0x39:
+				*(mBuff+startAddr+i) = 0x09;
+				break;
+			case 0x41:
+				*(mBuff+startAddr+i) = 0x0A;
+				break;
+			case 0x42:
+				*(mBuff+startAddr+i) = 0x0B;
+				break;
+			case 0xC3:
+				*(mBuff+startAddr+i) = 0x0C;
+				break;
+			case 0x44:
+				*(mBuff+startAddr+i) = 0x0D;
+				break;
+			case 0xC5:
+				*(mBuff+startAddr+i) = 0x0E;
+				break;
+			case 0xC6:
+				*(mBuff+startAddr+i) = 0x0F;
+				break;
+			default:
+				break;
+		}		
+	}
+}
+
+void ELSTER_Encode_byte(uint8_t *mBuff,uint8_t startAddr,uint8_t Length)
+{
+	uint8_t i = 0;
+	
+	for (i=0;i<Length;i++)
+	{
+		switch(*(mBuff+startAddr+i))
+		{
+			case 0x00:
+				*(mBuff+startAddr+i) = 0x30;
+				break;
+			case 0x01:
+				*(mBuff+startAddr+i) = 0xB1;
+				break;
+			case 0x02:
+				*(mBuff+startAddr+i) = 0xB2;
+				break;
+			case 0x03:
+				*(mBuff+startAddr+i) = 0x33;
+				break;
+			case 0x04:
+				*(mBuff+startAddr+i) = 0xB4;
+				break;
+			case 0x05:
+				*(mBuff+startAddr+i) = 0x35;
+				break;
+			case 0x06:
+				*(mBuff+startAddr+i) = 0x36;
+				break;
+			case 0x07:
+				*(mBuff+startAddr+i) = 0xB7;
+				break;
+			case 0x08:
+				*(mBuff+startAddr+i) = 0xB8;
+				break;
+			case 0x09:
+				*(mBuff+startAddr+i) = 0x39;
+				break;
+			case 0x0A:
+				*(mBuff+startAddr+i) = 0x41;
+				break;
+			case 0x0B:
+				*(mBuff+startAddr+i) = 0x42;
+				break;
+			case 0x0C:
+				*(mBuff+startAddr+i) = 0xC3;
+				break;
+			case 0x0D:
+				*(mBuff+startAddr+i) = 0x44;
+				break;
+			case 0x0E:
+				*(mBuff+startAddr+i) = 0xC5;
+				break;
+			case 0x0F:
+				*(mBuff+startAddr+i) = 0xC6;
+				break;
+			default:
+				break;
+		}		
+	}	
+}
+
+uint8_t ELSTER_Read (Meter_Comm_Struct *Meter_Comm,void (*FuncExtractRawData)(void),void (*FuncDataHandle)(void),void (*FuncSendMess)(void),uint8_t *CodeTable)
+{
+	uint8_t mReVal = 0;
+	
+	//Start read
+	Meter_Comm->Reading_ui8 = 1;
+	ELSTER_Handshake_Handle();
+	while(Meter_Comm->Reading_ui8 == 1) 
+	{
+		switch(Meter_Comm->Step_ui8) 
+		{
+			case 0:
+				Meter_Comm->Total_Mess_Sent_ui32++;
+				//Wait for respond message from Meter in 2000ms: checksum - extract raw data - save to buffer - goto next message
+				if (osSemaphoreWait(bsUART2PendingMessHandle,5000) == osOK) 
+				{
+					//Checksum
+					if (UART1_Control.Mess_Length_ui16 == 1)
+						UART1_Control.Mess_Status_ui8 = 2;
+					else
+						ELSTER_Mess_Checksum();
+					
+					if (UART1_Control.Mess_Status_ui8 == 2) 
+                    {
+						Meter_Comm->Success_Read_Mess_ui32++;
+						Meter_Comm->Step_ui8 = 1;
+						//Extract raw data
+						FuncExtractRawData();
+						//Reset UART2 status
+						Reset_UART1_State();
+						//Goto next message
+						Meter_Comm->Mess_Step_ui8++;
+						Meter_Comm->Error_ui8 = 0x00;
+						//If all mess sent -> finish
+						if (Meter_Comm->Mess_Step_ui8 > 1)
+                        {
+							if ((*(CodeTable+Meter_Comm->Mess_Step_ui8)) == 0xFF) 
+							{
+								//Push mess or check alarm
+								FuncDataHandle();
+								mReVal = 1;
+								Meter_Comm->Step_ui8 = 2;
+							}
+						}
+					} else 
+                    {
+						Meter_Comm->Error_Wrong_Mess_Format_ui32++;
+						//Reset UART
+						Reset_UART1_State();
+						//If Meter respond wrong, jump out of reading cycle
+						Meter_Comm->Step_ui8 = 2;
+					}
+				} else 
+                {//If Meter no respond after 2000ms: wait 2000ms - resend the message (3 times) 
+					Meter_Comm->Error_Meter_Norespond_ui32++;
+					//Reinit uart2
+//					MX_USART2_UART_Init();
+//					Init_UART2();
+//					__HAL_UART_ENABLE_IT(&huart1, UART_IT_RXNE);
+//					osDelay(1000);
+					//Reset UART
+					Reset_UART1_State();
+					//If Meter norespond, jump out of reading cycle
+					Meter_Comm->Step_ui8 = 2;
+				}
+				break;
+			case 1:
+				osDelay(Meter_Delay_ms);					
+				FuncSendMess();
+				Meter_Comm->Step_ui8 = 0;
+				break;
+			case 2:
+				osDelay(Meter_Delay_ms);
+				HAL_UART_Transmit(&huart1,&ELSTER_END[0],5,100);
+				//Reset UART2 status
+				Reset_UART1_State();
+				//Jump out of reading cycle, wait for next cycle (after 30mins)
+				Meter_Comm->Reading_ui8 = 0;
+				Meter_Comm->Step_ui8 = 1;
+				Meter_Comm->Mess_Step_ui8 = 0;
+				//Reset pointer
+				Meter_Comm->Data_Buff_Pointer_ui16 = 10;
+				break;					
+			default:
+				break;				
+		}
+	}
+	return mReVal;	
+}
+
+// 
+//		Meter ID
+//
+uint8_t Get_Meter_ID (void)
+{
+	uint8_t GetMeterIDSuccess = 0;
+	uint8_t GetMeterIDRetry = 3;
+	uint8_t	i=0,j=0;
+	uint8_t Temp_MeterID[8];
+	
+	while (GetMeterIDRetry--)
+	{
+		if (ELSTER_Handshake_Handle() == 1)
+		{
+			osDelay(500);
+			HAL_UART_Transmit(&huart1,&ELSTER_Get_MID[0],16,100);
+
+			if (osSemaphoreWait(bsUART2PendingMessHandle,2000) == osOK)
+			{
+				//Check sum
+				ELSTER_Mess_Checksum();
+				
+				if (UART1_Control.Mess_Status_ui8 == 2)
+				{
+					//Check Meter ID
+					ELSTER_Decode_byte(UART1_Receive_Buff,19,16);
+					for (i=0;i<16;i++)
+					{
+						Temp_MeterID[j] = UART1_Receive_Buff[19+i]+0x30;
+						j++;
+						i++;
+					}
+					if (sDCU.sMeter_id_now.Length_u16 != 8)
+						Read_Meter_ID_Change = 1;
+					for (i=0;i<8;i++)
+					{
+						if ((*(sDCU.sMeter_id_now.Data_a8+i)) != Temp_MeterID[i])
+						{
+							Read_Meter_ID_Change = 1;
+							break;
+						}
+					}
+
+					if (Read_Meter_ID_Change == 1)
+					{
+						sDCU.sMeter_id_now.Length_u16 = 8;
+						for (i = 0; i < METER_LENGTH; i++)
+							aMeter_ID[i] =  0;
+						for (i=0;i<8;i++)
+							aMeter_ID[i] =  Temp_MeterID[i];
+						Save_Meter_ID();
+					}
+					osDelay(500);
+					HAL_UART_Transmit(&huart1,&ELSTER_END[0],5,100);
+					Reset_UART1_State();
+					GetMeterIDSuccess = 1;
+					break;
+				}
+				else
+				{
+					osDelay(500);
+					HAL_UART_Transmit(&huart1,&ELSTER_END[0],5,100);
+					Reset_UART1_State();
+				}
+			}
+			else
+			{
+				osDelay(500);
+				HAL_UART_Transmit(&huart1,&ELSTER_END[0],5,100);
+				Reset_UART1_State();
+			}
+		}
+		else
+		{
+			osDelay(500);
+			HAL_UART_Transmit(&huart1,&ELSTER_END[0],5,100);
+			Reset_UART1_State();			
+		}
+	}
+	
+	return GetMeterIDSuccess;
+}
+
+// 
+// 		Meter info function
+//
+void Send_MInfo_Mess (void)
+{
+	uint8_t i=0,temp=0;
+	uint8_t mMess[22];
+	
+	temp = MeterInfoMessIDTable[Get_Meter_Info.Mess_Step_ui8];
+	for (i=0;i<ELSTER_MInfo_Table[temp][22];i++)
+		mMess[i] = ELSTER_MInfo_Table[temp][i];
+	HAL_UART_Transmit(&huart1,mMess,ELSTER_MInfo_Table[temp][22],100);
+}
+void MI_ExtractDataFunc (void)
+{
+	if ((MeterInfoMessIDTable[Get_Meter_Info.Mess_Step_ui8]==1)||(MeterInfoMessIDTable[Get_Meter_Info.Mess_Step_ui8]>10))
+	{
+		ELSTER_Decode_byte(UART1_Receive_Buff,2,UART1_Control.Mess_Length_ui16-4);   //chuyen sang 4 bit sau la giá tri HEX.
+		switch (Get_Meter_Info.Mess_Step_ui8)
+		{
+			case 5://VoltagePhaseA,B,C
+				MI_DecodeData_NoSpin( 2,14,Str_Ob_VolA, Unit_Voltage, SCALE_VOLTAGE);     
+				MI_DecodeData_NoSpin(16,14,Str_Ob_VolB, Unit_Voltage, SCALE_VOLTAGE);
+				MI_DecodeData_NoSpin(30,14,Str_Ob_VolC, Unit_Voltage, SCALE_VOLTAGE);
+				break;
+			case 11://CurrentPhaseA,B,C
+				MI_DecodeData_NoSpin( 2,14,Str_Ob_CurA, Unit_Current, SCALE_CURRENT);
+				MI_DecodeData_NoSpin(16,14,Str_Ob_CurB, Unit_Current, SCALE_CURRENT);
+				MI_DecodeData_NoSpin(30,14,Str_Ob_CurC, Unit_Current, SCALE_CURRENT);
+				break;
+			case 17://FrequencyPhaseA,B,C
+//				MI_DecodeData_NoSpin( 2,14,Str_Ob_Freq, Unit_Freq, SCALE_FREQ);
+//				MI_DecodeData_NoSpin(16,14,Str_Ob_Freq, Unit_Freq, SCALE_FREQ);
+				MI_DecodeData_NoSpin(30,14,Str_Ob_Freq, Unit_Freq, SCALE_FREQ);
+				break;
+			case 23://PhaseAnglePhaseA,B,C
+//				MI_DecodeData_NoSpin( 2,14,Str_Ob_PhAnglePhB, unit, SCALE_ANGLE_PHASE);
+//				MI_DecodeData_NoSpin(16,14,Str_Ob_PhAnglePhB,);
+//				MI_DecodeData_NoSpin(30,14,Str_Ob_PhAnglePhC, );				
+				break;
+			case 29://ActivePowerPhaseA,B,C,Total
+				MI_DecodeData_NoSpin( 2,14,Str_Ob_AcPowA, Unit_Active_Intan, SCALE_ACTIVE_POW);       
+				MI_DecodeData_NoSpin(16,14,Str_Ob_AcPowB, Unit_Active_Intan, SCALE_ACTIVE_POW); 
+				MI_DecodeData_NoSpin(30,14,Str_Ob_AcPowC, Unit_Active_Intan, SCALE_ACTIVE_POW);
+				MI_DecodeData_NoSpin(44,14,Str_Ob_AcPowTo, Unit_Active_Intan, SCALE_ACTIVE_POW);			
+				break;
+			case 35://ReactivePowerPhaseA,B,C,Total
+				MI_DecodeData_NoSpin( 2,14,Str_Ob_RePowA, Unit_Reactive_Intan, SCALE_REACTIVE_POW);     
+				MI_DecodeData_NoSpin(16,14,Str_Ob_RePowB, Unit_Reactive_Intan, SCALE_REACTIVE_POW);
+				MI_DecodeData_NoSpin(30,14,Str_Ob_RePowC, Unit_Reactive_Intan, SCALE_REACTIVE_POW);
+				MI_DecodeData_NoSpin(44,14,Str_Ob_RePowTo, Unit_Reactive_Intan, SCALE_REACTIVE_POW);					
+				break;
+			case 41://ApparentPowerPhaseA,B,C,Total
+//				MI_DecodeData_NoSpin( 2,14, obis, unit, SCALE_APPRENT_POW);
+//				MI_DecodeData_NoSpin(16,14,0x18);
+//				MI_DecodeData_NoSpin(30,14,0x19);
+//				MI_DecodeData_NoSpin(44,14,0x1A);					
+				break;
+			case 47://PowerFactorPhaseA,B,C,Total
+                MI_DecodeData_NoSpin( 2,14,Str_Ob_PoFac,  StrNull, SCALE_POW_FACTOR);
+				MI_DecodeData_NoSpin(16,14,Str_Ob_PoFacA, StrNull, SCALE_POW_FACTOR);
+				MI_DecodeData_NoSpin(30,14,Str_Ob_PoFacB, StrNull, SCALE_POW_FACTOR);
+				MI_DecodeData_NoSpin(44,14,Str_Ob_PoFacC, StrNull, SCALE_POW_FACTOR);					
+				break;
+			case 53://PhaseRotation
+//				MI_DecodeData_NoSpin( 2,14,0x43);
+				break;
+			case 54://Cumulative,0xTotal:,0xImportWh,ExportWh,Q1,Q2,Q3,Q4,Vah
+				MI_DecodeData_Spin( 2,16,Str_Ob_En_ImportWh, Unit_Active_EnTotal, SCALE_TOTAL_ENERGY);    
+				MI_DecodeData_Spin(18,16,Str_Ob_En_ExportWh, Unit_Active_EnTotal, SCALE_TOTAL_ENERGY);      
+				MI_DecodeData_Spin(34,16);   //them Q Reactive
+				MI_DecodeData_Spin(50,16,0x2A);
+				MI_DecodeData_Spin(66,16,0x2B);
+				MI_DecodeData_Spin(82,16,0x2C);
+//				MI_DecodeData_Spin(98,16,0x2D);
+				break;
+			case 55://EnergyPlusArate1-3,EnergySubArate1-3
+				MI_DecodeData_Spin( 2,16,Str_Ob_AcPlus_Rate1, Unit_Active_EnTotal, SCALE_TARRIFF);    
+				MI_DecodeData_Spin(18,16,Str_Ob_AcPlus_Rate2, Unit_Active_EnTotal, SCALE_TARRIFF);
+				MI_DecodeData_Spin(34,16,Str_Ob_AcPlus_Rate3, Unit_Active_EnTotal, SCALE_TARRIFF);
+				MI_DecodeData_Spin(50,16,Str_Ob_AcSub_Rate1, Unit_Active_EnTotal, SCALE_TARRIFF);   
+				MI_DecodeData_Spin(66,16,Str_Ob_AcSub_Rate2, Unit_Active_EnTotal, SCALE_TARRIFF);
+				MI_DecodeData_Spin(82,16,Str_Ob_AcSub_Rate3, Unit_Active_EnTotal, SCALE_TARRIFF);
+				break;
+			case 56://MaxDemandPlusARate13-Time
+				MI_DecodeData_Spin(12,14,Str_Ob_MaxDeRate1, Unit_MAXDEMAND, SCALE_MAX_DEMAND);  //value
+                MI_DecodeData_TimeBySecond( 2, 8);  //time     
+				MI_DecodeData_Spin(36,14,Str_Ob_MaxDeRate2, Unit_MAXDEMAND, SCALE_MAX_DEMAND);
+                MI_DecodeData_TimeBySecond(26, 8);
+				MI_DecodeData_Spin(60,14,Str_Ob_MaxDeRate3, Unit_MAXDEMAND, SCALE_MAX_DEMAND);	
+                MI_DecodeData_TimeBySecond(50, 8);   //giai ma lai time
+				break;
+			case 57://Tu-TuM
+				MI_DecodeData_Spin( 2, 8,Str_Ob_Tu, StrNull, SCALE_TU_TI); // ( 4, 6,0x42)   
+				MI_DecodeData_Spin(10, 6,Str_Ob_Tu, StrNull, SCALE_TU_TI);	// (12, 4,0x65)			
+				break;
+			case 58://Ti-TiM
+				MI_DecodeData_Spin( 2, 8,Str_Ob_Ti, StrNull, SCALE_TU_TI);  // 4 6     
+				MI_DecodeData_Spin(10, 4,Str_Ob_Ti, StrNull, SCALE_TU_TI);	 // 12 2				
+				break;
+			case 59://MeterTime
+				MI_DecodeData_DateTime( 2,14,0x01);
+				break;
+			default:
+				break;			
+		}
+		RMA_Extract_Data();
+	}
+}
+
+//them dau . thap phan vao trong chuoi Decimal cua 1 so
+
+void AddPoint_to_StringDec (truct_String *StrDec, uint8_t Scale)
+{
+    uint16_t i = 0;
+    uint16_t j = 0;
+    uint8_t Count = 0;
+    
+    if((StrDec->Length_u16 == 1) && (*(StrDec->Data_a8) == 0x30)) return;
+    
+    if(StrDec->Length_u16 >= (Scale + 1))
+    {
+        if(Scale != 0)
+        {
+            //chuyen cac chu so dich ra sau 1 de lay 1 vi tri cho
+            for(i = 0; i < Scale; i++)
+            {
+                *(StrDec->Data_a8 + StrDec->Length_u16 - i) = *(StrDec->Data_a8 + StrDec->Length_u16 - i - 1);
+            }
+        
+            *(StrDec->Data_a8 + StrDec->Length_u16 - i) = '.';                                                           
+            //them dau cham vao vi tri da chon
+            StrDec->Length_u16++;
+            //neu sau dau. có cac so 0 bi thua thi bo di
+            for(j = (StrDec->Length_u16 - 1); j >= (StrDec->Length_u16 - 1 - Scale); j--)
+            {
+              if(*(StrDec->Data_a8 + j) == '0')
+              {
+                  Count++;  
+              }else if(*(StrDec->Data_a8 + j) == '.')
+              {
+                  Count++;
+                  break;
+              }
+              else break;
+            }
+            
+            StrDec->Length_u16 -= Count;
+        } 
+    }else
+    {
+        if(Scale!= 0)
+        {
+            //chuyen cac chu so dich ra sau: (scale - strDecLength) + 2.vi tri
+            for(i = 0; i < StrDec->Length_u16; i++)
+            {
+                *(StrDec->Data_a8 + Scale + 1 - i) = *(StrDec->Data_a8 + StrDec->Length_u16 - i - 1);
+            }
+        
+            //ghi them 0. vao
+            *(StrDec->Data_a8 + 0) = '0';
+            *(StrDec->Data_a8 + 1) = '.';
+            for(i = 0; i < (Scale - StrDec->Length_u16); i++)
+                *(StrDec->Data_a8 + 2 + i) = '0';
+                
+            StrDec->Length_u16 = Scale + 2;
+            //neu sau dau. có cac so 0 bi thua thi bo di
+            for(j = (StrDec->Length_u16 - 1); j >= 1 ; j--)
+              if(*(StrDec->Data_a8 + j) == '0')
+              {
+                  Count++;  
+              }else if(*(StrDec->Data_a8 + j) == '.')
+              {
+                  Count++;
+                  break;
+              }
+              else  break;
+            
+            StrDec->Length_u16 -= Count;
+        }
+    }
+    
+}
+
+
+void MI_DecodeData_NoSpin (uint8_t startPos, uint8_t dataLength, const truct_String oBIS, const truct_String unit, uint8_t ScaleNum )
+{
+	uint8_t i=0;
+    uint8_t Sign = 0;
+    uint8_t Scale = 0;
+    uint8_t Buff_data[20];
+    uint8_t BuffPayload[30];
+    uint8_t Flag_ZeroFirst = 0;
+    truct_String Str_Data_Write = {&Buff_data[0], 0};
+    truct_String StrAdd_To_payload = {&BuffPayload[0], 0};
+   
+	for (i=0;i<dataLength;i++)
+		MeterRawData[i] = UART1_Receive_Buff[startPos+i];
+	
+    if(Get_Meter_Info.Flag_Start_Pack == 0)
+    {
+        Reset_Buff(&Get_Meter_Info.Str_Payload);
+        //wrire header TSVH vao
+        Write_Header_TSVH_Push103();
+        Get_Meter_Info.Flag_Start_Pack = 1;
+    }   
+    
+    
+    if(MeterRawData[0] == 8) Sign = 1; //dau am
+    else Sign = 0;  //duong
+    
+    Scale = ((MeterRawData[0] & 0x07) << 4) | MeterRawData[1];
+    
+    if(Scale > 4) return;    //neu scale > 4: du lieu bi loi
+    
+    //ghi obis va data vao
+    Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Obis_Inbuff, &oBIS);
+    Get_Meter_Info.Pos_Obis_Inbuff += oBIS.Length_u16;
+    
+    if(oBIS.Length_u16 != 0) Get_Meter_Info.Numqty ++;
+    //ghi data vao
+    
+    
+    if((MeterRawData[2] == 0x0F) & (MeterRawData[3] == 0x0F)) 
+    {
+      *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = '0';
+    }else
+    {
+        for (i=2;i<dataLength;i++)
+        {
+            if(Flag_ZeroFirst == 0)
+            {
+                if(MeterRawData[i] == 0) 
+                  continue;
+                else Flag_ZeroFirst = 1;
+            }
+
+            *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = MeterRawData[i]; 
+        }
+        if(Flag_ZeroFirst == 0) *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = '0';   //neu gia tri deu la so 0 thi ghi 1 so 0 vao Buff
+    }
+    //scale trong value. 1 tuong ung voi 10, 2: 100... chi max la 4.
+    //Cac dai luong Vol, cur, PA, PR PAP moi tinh den scale nay
+    if((Get_Meter_Info.Mess_Step_ui8 == 5) || (Get_Meter_Info.Mess_Step_ui8 == 11) || 
+        (Get_Meter_Info.Mess_Step_ui8 == 29) || (Get_Meter_Info.Mess_Step_ui8 == 35) || (Get_Meter_Info.Mess_Step_ui8 == 41))  
+    for(i = 0; i < Scale; i++)
+         *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = '0';
+    
+    //them dau '.' vao vi tri tuong ung voi scale
+    AddPoint_to_StringDec(&Str_Data_Write, ScaleNum);
+    
+    //copy ca chuoi du lieu bao gom ca  ().
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '(';
+    if(Sign == 1)   
+      *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '-';
+    for(i = 0; i < Str_Data_Write.Length_u16; i++)
+      *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = *(Str_Data_Write.Data_a8 + i) ;
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '*';
+    Copy_String_2(&StrAdd_To_payload, &unit);  //don vi
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = ')';
+    
+    
+    Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Data_Inbuff, &StrAdd_To_payload);
+    Get_Meter_Info.Pos_Data_Inbuff = Get_Meter_Info.Str_Payload.Length_u16;
+}
+
+void MI_DecodeData_TimeBySecond (uint8_t startPos, uint8_t dataLength)
+{
+    int8_t i = 0;
+    uint8_t j = 0;
+    uint32_t            meterTimeStamp = 0;
+    ST_TIME_FORMAT 		sTimeConvert;
+    uint8_t BuffPayload[30];
+    truct_String StrAdd_To_payload = {&BuffPayload[0], 0};
+    
+    uint8_t   aTempData[16] = {0};
+    
+	for (i=0;i<dataLength;i++)
+		MeterRawData[i] = UART1_Receive_Buff[startPos+i];
+	
+    for (i=dataLength-1; i>-1;i-=2)
+	{
+		aTempData[dataLength-1-i] =  MeterRawData[i-1];
+		aTempData[dataLength-i] =  MeterRawData[i];
+	}
+    
+    for (i=0;i<dataLength;i++)
+	{
+		MeterRawData[j] = (aTempData[i]<<4)|(aTempData[i+1]);
+		i++;
+		j++;
+	}
+    
+    for (j=0;j<4;j++)
+        meterTimeStamp = meterTimeStamp|(MeterRawData[j]<<(j*8));
+    Epoch_to_date_time_Elster(&sTimeConvert,meterTimeStamp);
+    
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '('; 
+    Copy_String_STime(&StrAdd_To_payload,sTimeConvert);
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = ')';
+    
+    
+    Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Data_Inbuff, &StrAdd_To_payload);
+    Get_Meter_Info.Pos_Data_Inbuff = Get_Meter_Info.Str_Payload.Length_u16;
+}
+
+uint64_t Q1_Data = 0;
+uint64_t Q3_Data = 0;
+void MI_DecodeData_Spin (uint8_t startPos, uint8_t dataLength, const truct_String oBIS, const truct_String unit, uint8_t ScaleNum)
+{
+	int8_t i=0;
+    uint8_t Buff_data[20];
+    uint8_t BuffPayload[30];
+    uint8_t Flag_ZeroFirst = 0;
+    truct_String Str_Data_Write = {&Buff_data[0], 0};
+    uint8_t Flag_have_TuTi = 0;
+    truct_String StrAdd_To_payload = {&BuffPayload[0], 0};
+    uint8_t   aTempData[16] = {0};
+    uint64_t 	Temp_data = 0;
+    
+	for (i=0;i<dataLength;i++)
+		MeterRawData[i] = UART1_Receive_Buff[startPos+i];
+	
+    for (i=dataLength-1; i>-1;i-=2)
+	{
+		aTempData[dataLength-1-i] =  MeterRawData[i-1];
+		aTempData[dataLength-i] =  MeterRawData[i];
+	}
+    
+    if(Get_Meter_Info.Flag_Start_Pack == 0)
+    {
+        Reset_Buff(&Get_Meter_Info.Str_Payload);
+        //wrire header TSVH vao
+        Write_Header_TSVH_Push103();
+        Get_Meter_Info.Flag_Start_Pack = 1;
+    }   
+    
+    Flag_have_TuTi = Compare_String(oBIS, Str_Ob_Tu);  
+    Flag_have_TuTi |= Compare_String(oBIS, Str_Ob_Ti);
+    
+	//ghi obis va data vao
+    if(((Flag_have_TuTi != 1) || (startPos != 10)) && 
+       ((Get_Meter_Info.Mess_Step_ui8 != 54) || (startPos != 34) || (startPos != 66))) //Khac Tum Tim, Q1, Q3 moi cho ghi obis
+    {
+        Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Obis_Inbuff, &oBIS);
+        Get_Meter_Info.Pos_Obis_Inbuff += oBIS.Length_u16;
+        
+        if(oBIS.Length_u16 != 0) Get_Meter_Info.Numqty ++;
+    }
+    //bo qua sign va scale
+    
+    if(Get_Meter_Info.Mess_Step_ui8 != 54)
+    {
+        for (i=2;i<dataLength;i++)
+        {
+            if(Flag_ZeroFirst == 0)
+            {
+                if(aTempData[i] == 0) 
+                  continue;
+                else Flag_ZeroFirst = 1;
+            }
+
+            *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = aTempData[i]; 
+        }
+        if(Flag_ZeroFirst == 0) *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = '0';   //neu gia tri deu la so 0 thi ghi 1 so 0 vao Buff
+        
+        //them dau '.' vao vi tri tuong ung voi scale
+        AddPoint_to_StringDec(&Str_Data_Write, ScaleNum);
+    }else
+    {
+        //ghep data thanh Hex.
+        for (i=2;i<dataLength;i++)
+        {
+            Temp_data = Temp_data*10 + (aTempData[i] & 0x0F);
+        }
+        //công lai
+        if((startPos == 0x07)||(startPos == 0x09))
+        {
+            if(oBIS == 0x07)
+                Q1_Data = Temp_data;
+            if(oBIS == 0x09)
+                Q3_Data = Temp_data;
+        }
+        else
+        {
+            if(oBIS == 0x06)
+                Temp_data += Q1_Data;
+            if(oBIS == 0x08)
+                Temp_data += Q3_Data;
+        }
+    }
+    
+    //copy ca chuoi du lieu bao gom ca  ().
+    if((Flag_have_TuTi == 1) && (startPos == 10))  //Neu la Tum va Tim   
+        *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '/';
+    else
+        *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '(';
+    
+    for(i = 0; i < Str_Data_Write.Length_u16; i++)
+      *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = *(Str_Data_Write.Data_a8 + i) ;
+    
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '*';
+    Copy_String_2(&StrAdd_To_payload, &unit);  //don vi
+    
+    if((Flag_have_TuTi != 1) || (startPos != 2)) //neu khac Tu Ti thi có ')'. Còn neu la Tu va Ti thi k co ')'
+        *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = ')';
+    
+    Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Data_Inbuff, &StrAdd_To_payload);
+    Get_Meter_Info.Pos_Data_Inbuff = Get_Meter_Info.Str_Payload.Length_u16;
+}
+
+
+
+void MI_DecodeData_DateTime (uint8_t startPos, uint8_t dataLength, uint8_t oBIS)
+{
+	uint8_t i=0,j=0;
+	ST_TIME_FORMAT					sTime_Ins;
+    uint8_t Buff_data[20];
+    truct_String Str_Data_Write = {&Buff_data[0], 0};
+    
+	for (i=0;i<dataLength;i++)
+	{
+		MeterRawData[j] = (UART1_Receive_Buff[startPos+i]<<4)|(UART1_Receive_Buff[startPos+i+1]);
+		i++;
+		j++;
+	}
+	
+    sTime_Ins.year  = MeterRawData[6]; 		 // year
+    sTime_Ins.month = MeterRawData[4]&0x1F;  // month
+	sTime_Ins.date  = MeterRawData[3]&0x3F;  // date
+	
+	sTime_Ins.hour  = MeterRawData[2];       // hour
+	sTime_Ins.min   = MeterRawData[1]; 		 // min 
+	sTime_Ins.sec   = MeterRawData[0];	     // sec 
+    //Ghi them data he so nhan vao
+    Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Obis_Inbuff, &He_So_Nhan);
+    Get_Meter_Info.Numqty++;
+    //he so nhan	
+    *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = '(';
+    Pack_HEXData_Frame_Uint64(&Str_Data_Write, (uint64_t) sDCU.He_So_Nhan, SCALE_HE_SO_NHAN); 
+    *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = ')';
+    
+    Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Data_Inbuff, &Str_Data_Write);
+    
+    Str_Data_Write.Length_u16 = 0;
+    
+    //ghi stime vao vi tri Pos numqty. Sau do ghi numqty.
+    *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = '('; 
+    Copy_String_STime(&Str_Data_Write,sTime_Ins);
+    *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = ')'; 
+    
+    *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = '('; 
+    Pack_HEXData_Frame_Uint64(&Str_Data_Write, (uint64_t) Get_Meter_Info.Numqty, 0);
+    *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = ')'; 
+    
+	Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.PosNumqty, &Str_Data_Write);
+    
+    Get_Meter_Info.Pos_Obis_Inbuff += Str_Data_Write.Length_u16;
+    Get_Meter_Info.Pos_Data_Inbuff = Get_Meter_Info.Str_Payload.Length_u16;
+}
+void MI_SendData(void)
+{
+	uint32_t	i=0;
+	uint32_t	temp=0;
+	uint8_t     Temp_BBC = 0;
+    
+    //ETX
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = ETX; 
+    //BBC
+    Temp_BBC = BBC_Cacul(Get_Meter_Info.Str_Payload.Data_a8 + 1,Get_Meter_Info.Str_Payload.Length_u16 - 1);
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = Temp_BBC;
+    
+    //Neu ban tin qua 1000 byte thi cat thanh 2 ban tin
+    if(Get_Meter_Info.Str_Payload.Length_u16 > 1000)
+    {
+        for(i = 1000; i < Get_Meter_Info.Str_Payload.Length_u16; i++)
+        {
+            *(Get_Meter_Info.Str_Payload_2.Data_a8 + Get_Meter_Info.Str_Payload_2.Length_u16++) = *(Get_Meter_Info.Str_Payload.Data_a8 + i);
+        }
+        Get_Meter_Info.Str_Payload.Length_u16 = 1000;
+    }
+    
+    //Push data to queue
+    //Them length trong phan luu flash
+    for(i = 0; i < Get_Meter_Info.Str_Payload.Length_u16; i++)
+        *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16 + 1 - i) = *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16 - i - 1);
+    
+    Get_Meter_Info.Str_Payload.Length_u16 += 2;
+    *(Get_Meter_Info.Str_Payload.Data_a8)     = (uint8_t) ((Get_Meter_Info.Str_Payload.Length_u16 + 1) >> 8) ;
+    *(Get_Meter_Info.Str_Payload.Data_a8 + 1) = (uint8_t) (Get_Meter_Info.Str_Payload.Length_u16 + 1) ;
+    
+    //Generate checksum byte
+    for (i=0;i<Get_Meter_Info.Str_Payload.Length_u16;i++)
+        temp += MeterInfoDataBuff[i];
+    
+    temp = temp & 0x000000FF;
+    
+     *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16) = (uint8_t)temp;
+
+    Queue_Meter_Info.Mess_Direct_ui8 = 1;
+    Queue_Meter_Info.str_Flash.Length_u16 = Get_Meter_Info.Str_Payload.Length_u16 + 1;
+    Queue_Meter_Info.Mess_Status_ui8 = 0;
+    Queue_Meter_Info.Mess_Type_ui8 = DATA_OPERATION;
+    Queue_Meter_Info.str_Flash.Data_a8 = &MeterInfoDataBuff[0];
+    
+    xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_Info,100);
+    
+    //Neu co ban tin bi cat thi lai day them vao hang doi
+    if(Get_Meter_Info.Str_Payload_2.Length_u16 > 0)
+    {
+        //Them length trong phan luu flash
+        for(i = 0; i < Get_Meter_Info.Str_Payload_2.Length_u16; i++)
+            *(Get_Meter_Info.Str_Payload_2.Data_a8 + Get_Meter_Info.Str_Payload_2.Length_u16 + 1 - i) = *(Get_Meter_Info.Str_Payload_2.Data_a8 + Get_Meter_Info.Str_Payload_2.Length_u16 - i - 1);
+        
+        Get_Meter_Info.Str_Payload_2.Length_u16 += 2;
+        *(Get_Meter_Info.Str_Payload_2.Data_a8)     = (uint8_t) ((Get_Meter_Info.Str_Payload_2.Length_u16 + 1) >> 8) ;
+        *(Get_Meter_Info.Str_Payload_2.Data_a8 + 1) = (uint8_t) (Get_Meter_Info.Str_Payload_2.Length_u16 + 1);
+        
+        //Generate checksum byte
+        for (i=0;i<Get_Meter_Info.Str_Payload_2.Length_u16;i++)
+            temp += MeterInfoDataBuff_2[i];
+        
+        temp = temp & 0x000000FF;
+        
+        *(Get_Meter_Info.Str_Payload_2.Data_a8 + Get_Meter_Info.Str_Payload_2.Length_u16) = (uint8_t)temp;
+     
+        Queue_Meter_Info.Mess_Direct_ui8 = 1;
+        Queue_Meter_Info.str_Flash.Length_u16 = Get_Meter_Info.Str_Payload_2.Length_u16 + 1;
+        Queue_Meter_Info.Mess_Status_ui8 = 0;
+        Queue_Meter_Info.Mess_Type_ui8 = DATA_OPERATION;
+        Queue_Meter_Info.str_Flash.Data_a8 = &MeterInfoDataBuff_2[0];
+        
+        xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_Info,100);
+    }      
+                            
+}
+void MI_SendData_Inst(void)
+{
+	uint32_t	i=0;
+	uint8_t     Temp_BBC = 0;
+    
+    //ETX
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = ETX; 
+    //BBC
+    Temp_BBC = BBC_Cacul(Get_Meter_Info.Str_Payload.Data_a8 + 1,Get_Meter_Info.Str_Payload.Length_u16 - 1);
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = Temp_BBC;
+    
+    //Neu ban tin qua 1000 byte thi cat thanh 2 ban tin
+    if(Get_Meter_Info.Str_Payload.Length_u16 > 1000)
+    {
+        for(i = 1000; i < Get_Meter_Info.Str_Payload.Length_u16; i++)
+        {
+            *(Get_Meter_Info.Str_Payload_2.Data_a8 + Get_Meter_Info.Str_Payload_2.Length_u16++) = *(Get_Meter_Info.Str_Payload.Data_a8 + i);
+        }
+        Get_Meter_Info.Str_Payload.Length_u16 = 1000;
+    }
+    
+    //Push data to queue
+   
+    Queue_Meter_Info.Mess_Direct_ui8 = 1;
+    Queue_Meter_Info.str_Flash.Length_u16 = Get_Meter_Info.Str_Payload.Length_u16;
+    Queue_Meter_Info.Mess_Status_ui8 = 0;
+    Queue_Meter_Info.Mess_Type_ui8 = DATA_INTANTANIOUS;
+    Queue_Meter_Info.str_Flash.Data_a8 = &MeterInfoDataBuff[0];
+ 
+    xQueueSend(qMeter_SIM900Handle,(void *)&ptrQueue_Meter_Info,100);
+    
+    //Neu co ban tin bi cat thi lai day them vao hang doi
+    if(Get_Meter_Info.Str_Payload_2.Length_u16 > 0)
+    {
+        Queue_Meter_Info.Mess_Direct_ui8 = 1;
+        Queue_Meter_Info.str_Flash.Length_u16 = Get_Meter_Info.Str_Payload_2.Length_u16;
+        Queue_Meter_Info.Mess_Status_ui8 = 0;
+        Queue_Meter_Info.Mess_Type_ui8 = DATA_INTANTANIOUS;
+        Queue_Meter_Info.str_Flash.Data_a8 = &MeterInfoDataBuff_2[0];
+        
+        xQueueSend(qMeter_SIM900Handle,(void *)&ptrQueue_Meter_Info,100);
+    }		
+}
+// 
+// 		Meter billing function
+//
+void Send_MBilling_Mess (void)
+{
+	uint8_t i=0,temp=0,temp_checksum=0;
+	
+	temp = MeterBillingMessIDTable[Get_Meter_Billing.Mess_Step_ui8];
+	
+	for (i=0;i<5;i++)
+		MeterBillingTemplate[i+8] = ELSTER_MBilling_Table[temp][i];
+	for (i=1;i<15;i++)
+		temp_checksum = temp_checksum ^ MeterBillingTemplate[i];
+	
+	MeterBillingTemplate[15] = temp_checksum;
+	
+	HAL_UART_Transmit(&huart1,MeterBillingTemplate,16,100);
+}
+void MB_ExtractDataFunc (void)
+{
+	uint8_t i=0;
+	
+	ELSTER_Decode_byte(UART1_Receive_Buff,2,UART1_Control.Mess_Length_ui16-4);
+	for (i=2;i<UART1_Control.Mess_Length_ui16-2;i++)
+		ELSTER_TempBuff[Get_Meter_Billing.Data_Buff_Pointer_ui16++] = UART1_Receive_Buff[i];
+}
+
+void MB_DecodeData_TimeBySecond (uint16_t startPos, uint8_t dataLength)
+{
+    int8_t i = 0;
+    uint8_t j = 0;
+    uint32_t            meterTimeStamp = 0;
+    ST_TIME_FORMAT 		sTimeConvert;
+    uint8_t BuffPayload[30];
+    truct_String StrAdd_To_payload = {&BuffPayload[0], 0};
+    
+    uint8_t   aTempData[16] = {0};
+    
+	for (i=0;i<dataLength;i++)
+		MeterRawData[i] = UART1_Receive_Buff[startPos+i];
+	
+    for (i=dataLength-1; i>-1;i-=2)
+	{
+		aTempData[dataLength-1-i] =  MeterRawData[i-1];
+		aTempData[dataLength-i] =  MeterRawData[i];
+	}
+    
+    for (i=0;i<dataLength;i++)
+	{
+		MeterRawData[j] = (aTempData[i]<<4)|(aTempData[i+1]);
+		i++;
+		j++;
+	}
+    
+    for (j=0;j<4;j++)
+        meterTimeStamp = meterTimeStamp|(MeterRawData[j]<<(j*8));
+    Epoch_to_date_time_Elster(&sTimeConvert,meterTimeStamp);
+    
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '('; 
+    Copy_String_STime(&StrAdd_To_payload,sTimeConvert);
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = ')';
+    
+    if(startPos != 1718)
+    {
+        Copy_String_toTaget(&Get_Meter_Billing.Str_Payload, Get_Meter_Billing.Pos_Data_Inbuff, &StrAdd_To_payload);
+        Get_Meter_Billing.Pos_Data_Inbuff = Get_Meter_Billing.Str_Payload.Length_u16;
+    }else    //neu la stime cua Billing. ghi stime va numqty
+    {
+        *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '('; 
+        Pack_HEXData_Frame_Uint64(&StrAdd_To_payload, (uint64_t) Get_Meter_Billing.Numqty, 0);
+        *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = ')'; 
+        
+        Copy_String_toTaget(&Get_Meter_Billing.Str_Payload, Get_Meter_Billing.PosNumqty, &StrAdd_To_payload);
+        
+        Get_Meter_Billing.Pos_Obis_Inbuff += StrAdd_To_payload.Length_u16;
+        Get_Meter_Billing.Pos_Data_Inbuff = Get_Meter_Billing.Str_Payload.Length_u16;
+    }
+}
+
+void MB_DecodeData_Spin (uint16_t startPos, uint8_t dataLength, const truct_String oBIS, const truct_String unit, uint8_t ScaleNum)
+{
+	int8_t i=0;
+    uint8_t Buff_data[20];
+    uint8_t BuffPayload[30];
+    truct_String StrAdd_To_payload = {&BuffPayload[0], 0};
+    uint8_t Flag_ZeroFirst = 0;
+    truct_String Str_Data_Write = {&Buff_data[0], 0};
+    uint8_t   aTempData[16] = {0};
+    
+	for (i=0;i<dataLength;i++)
+		MeterRawData[i] = ELSTER_TempBuff[startPos+i];
+	
+    //dao lai cac byte
+    for (i=dataLength-1; i>-1;i-=2)
+	{
+		aTempData[dataLength-1-i] =  MeterRawData[i-1];
+		aTempData[dataLength-i] =  MeterRawData[i];
+	}
+    
+    if(Get_Meter_Billing.Flag_Start_Pack == 0)
+    {
+        Reset_Buff(&Get_Meter_Billing.Str_Payload);
+        Write_Header_His_Push103();
+        Get_Meter_Billing.Flag_Start_Pack = 1;
+    }
+    //ghi obis vao
+    Copy_String_toTaget(&Get_Meter_Billing.Str_Payload, Get_Meter_Billing.Pos_Obis_Inbuff, &oBIS);
+    Get_Meter_Billing.Pos_Obis_Inbuff += oBIS.Length_u16;
+    
+    if(oBIS.Length_u16 != 0) Get_Meter_Billing.Numqty ++;
+    //ghi data vao
+    
+    for (i=2;i<dataLength;i++)
+    {
+        if(Flag_ZeroFirst == 0)
+        {
+            if(aTempData[i] == 0) 
+              continue;
+            else Flag_ZeroFirst = 1;
+        }
+
+        *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = aTempData[i]; 
+    }
+    if(Flag_ZeroFirst == 0) *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = '0';   //neu gia tri deu la so 0 thi ghi 1 so 0 vao Buff
+    
+    //them dau '.' vao vi tri tuong ung voi scale
+    AddPoint_to_StringDec(&Str_Data_Write, ScaleNum);
+
+    
+    //copy ca chuoi du lieu bao gom ca  ().
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '(';
+    
+    for(i = 0; i < Str_Data_Write.Length_u16; i++)
+      *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = *(Str_Data_Write.Data_a8 + i) ;
+    
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '*';
+    Copy_String_2(&StrAdd_To_payload, &unit);  //don vi
+
+    *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = ')';
+    
+    Copy_String_toTaget(&Get_Meter_Billing.Str_Payload, Get_Meter_Billing.Pos_Data_Inbuff, &StrAdd_To_payload);
+    Get_Meter_Billing.Pos_Data_Inbuff = Get_Meter_Billing.Str_Payload.Length_u16;
+}
+
+//void MB_DecodeBeginTime (uint16_t startPos, uint8_t dataLength, uint8_t oBIS)
+//{
+//	int8_t i=0;
+//	uint32_t BeginTimeStamp=0;
+//	uint8_t Temp0=0;
+//	ST_TIME_FORMAT BeginTime;
+//	
+//	for (i=0;i<dataLength;i++)
+//		MeterRawData[i] = ELSTER_TempBuff[startPos+i];
+//	
+//	for (i=dataLength-2;i>-1;i--)
+//	{
+//		Temp0 = (MeterRawData[i]<<4)|(MeterRawData[i+1]);
+//		BeginTimeStamp = BeginTimeStamp|(Temp0<<(4*i));
+//		i--;
+//	}
+//	Epoch_to_date_time_Elster(&BeginTime,BeginTimeStamp);
+//	MeterBillingDataBuff[Get_Meter_Billing.Data_Buff_Pointer_ui16++] = oBIS;
+//	MeterBillingDataBuff[Get_Meter_Billing.Data_Buff_Pointer_ui16++] = 0x06;
+//	MeterBillingDataBuff[Get_Meter_Billing.Data_Buff_Pointer_ui16++] = BeginTime.year;
+//	MeterBillingDataBuff[Get_Meter_Billing.Data_Buff_Pointer_ui16++] = BeginTime.month;
+//	MeterBillingDataBuff[Get_Meter_Billing.Data_Buff_Pointer_ui16++] = BeginTime.date;
+//	MeterBillingDataBuff[Get_Meter_Billing.Data_Buff_Pointer_ui16++] = BeginTime.hour;
+//	MeterBillingDataBuff[Get_Meter_Billing.Data_Buff_Pointer_ui16++] = BeginTime.min;
+//	MeterBillingDataBuff[Get_Meter_Billing.Data_Buff_Pointer_ui16++] = BeginTime.sec;
+//}
+void MB_SendData(void)
+{
+	uint16_t 	i=0;
+	uint32_t	temp=0;
+	uint8_t     Temp_BBC = 0;
+    uint8_t Buff_data[20];
+    truct_String Str_Data_Write = {&Buff_data[0], 0};
+    
+	Get_Meter_Billing.Data_Buff_Pointer_ui16 = 10;
+	MB_DecodeData_Spin(  10,16,Str_Ob_AcImTotal_Chot, Unit_Active_EnTotal, SCALE_TOTAL_ENERGY);  //Import Kwh  
+	MB_DecodeData_Spin(  26,16,Str_Ob_AcExTotal_Chot, Unit_Reactive_EnTotal, SCALE_TOTAL_ENERGY);
+    
+//	MB_DecodeData_Spin(  42,16,0x29);   //Them Q1+Q3 và Q2+Q4
+//	MB_DecodeData_Spin(  58,16,0x2A);
+//	MB_DecodeData_Spin(  74,16,0x2B);
+//	MB_DecodeData_Spin(  90,16,0x2C);
+    
+//	MB_DecodeData_Spin( 106,16,0x2D);
+	MB_DecodeData_Spin( 170,16,Str_Ob_AcPlus_Rate1_chot, Unit_Active_EnTotal, SCALE_TARRIFF);   //bieu 1 import        
+	MB_DecodeData_Spin( 186,16,Str_Ob_AcPlus_Rate2_chot, Unit_Active_EnTotal, SCALE_TARRIFF);
+	MB_DecodeData_Spin( 202,16,Str_Ob_AcPlus_Rate3_chot, Unit_Active_EnTotal, SCALE_TARRIFF);
+    
+	MB_DecodeData_Spin( 218,16,Str_Ob_AcSub_Rate1_chot, Unit_Active_EnTotal, SCALE_TARRIFF);
+	MB_DecodeData_Spin( 234,16,Str_Ob_AcSub_Rate2_chot, Unit_Active_EnTotal, SCALE_TARRIFF);
+	MB_DecodeData_Spin( 250,16,Str_Ob_AcSub_Rate3_chot, Unit_Active_EnTotal, SCALE_TARRIFF);
+    
+	
+	MB_DecodeData_Spin( 922,16,Str_Ob_MaxDe2Rate1_Chot, Unit_MAXDEMAND, SCALE_MAX_DEMAND);  //value
+    MB_DecodeData_TimeBySecond( 914, 8);   //time   
+	
+	MB_DecodeData_Spin(1018,16,Str_Ob_MaxDe2Rate2_Chot, Unit_MAXDEMAND, SCALE_MAX_DEMAND);
+    MB_DecodeData_TimeBySecond(1010, 8);
+
+    MB_DecodeData_Spin(1042,16,Str_Ob_MaxDe2Rate3_Chot, Unit_MAXDEMAND, SCALE_MAX_DEMAND);
+	MB_DecodeData_TimeBySecond(1034, 8);
+	
+    //ghi Tu Ti vao
+    Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Obis_Inbuff, &Str_Ob_Tu); 
+    Get_Meter_Info.Pos_Obis_Inbuff += Str_Ob_Tu.Length_u16;
+    Get_Meter_Info.Numqty++;
+    Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Obis_Inbuff, &Str_Ob_Ti);  
+    Get_Meter_Info.Pos_Obis_Inbuff += Str_Ob_Ti.Length_u16;
+    Get_Meter_Info.Numqty++;
+    Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Obis_Inbuff, &He_So_Nhan);  
+    Get_Meter_Info.Pos_Obis_Inbuff += He_So_Nhan.Length_u16;
+    Get_Meter_Info.Numqty++;
+    
+    
+    Copy_String_toTaget(&Get_Meter_Info.Str_Payload, Get_Meter_Info.Pos_Data_Inbuff, &Get_Meter_TuTi.Str_Payload);
+    Get_Meter_Info.Pos_Data_Inbuff = Get_Meter_Info.Str_Payload.Length_u16;
+        
+//	MB_DecodeData_Spin(1706, 4,0x5D);
+//	MB_DecodeData_Spin(1710, 8,0x5B);
+    
+    //ghi time 
+	MB_DecodeData_TimeBySecond(1718, 8);   
+	
+    //ETX
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = ETX; 
+    //BBC
+    Temp_BBC = BBC_Cacul(Get_Meter_Billing.Str_Payload.Data_a8 + 1,Get_Meter_Billing.Str_Payload.Length_u16 - 1);
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = Temp_BBC;
+    
+    //Push data to queue
+   //Them length trong phan luu flash
+    for(i = 0; i < Get_Meter_Billing.Str_Payload.Length_u16; i++)
+        *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16 + 1 - i) = *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16 - i - 1);
+    
+    Get_Meter_Billing.Str_Payload.Length_u16 += 2;
+    *(Get_Meter_Billing.Str_Payload.Data_a8)     = (uint8_t) ((Get_Meter_Billing.Str_Payload.Length_u16 + 1) >> 8) ;
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + 1) = (uint8_t) (Get_Meter_Billing.Str_Payload.Length_u16 + 1);
+    
+    
+    //Generate checksum byte
+    for (i=0;i<Get_Meter_Billing.Str_Payload.Length_u16;i++)
+        temp += MeterBillingDataBuff[i];
+    
+    temp = temp & 0x000000FF;
+    
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16) = (uint8_t)temp;
+                
+    Queue_Meter_Billing.Mess_Direct_ui8 = 1;
+    Queue_Meter_Billing.str_Flash.Length_u16 = 	Get_Meter_Billing.Str_Payload.Length_u16 + 1;
+    Queue_Meter_Billing.Mess_Status_ui8 = 0;
+    Queue_Meter_Billing.Mess_Type_ui8 = DATA_HISTORICAL;
+    Queue_Meter_Billing.str_Flash.Data_a8 = &MeterBillingDataBuff[0];
+    
+    xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_Billing,100);
+}
+// 
+// 		Meter event function
+//
+void Send_MEvent_Mess (void)
+{
+	uint8_t i=0,temp=0;
+	uint8_t mMess[22];
+	
+	temp = MeterEventMessIDTable[Get_Meter_Event.Mess_Step_ui8];
+	for (i=0;i<16;i++)
+		mMess[i] = ELSTER_MEvent_Table[temp][i];
+	HAL_UART_Transmit(&huart1,mMess,16,100);
+}
+void ME_ExtractDataFunc (void)
+{
+	ELSTER_Decode_byte(UART1_Receive_Buff,2,UART1_Control.Mess_Length_ui16-4);
+	switch(Get_Meter_Event.Mess_Step_ui8)
+	{
+		case 0://ProgrammingLog
+			ME_DecodeData_Spin( 2, 4,0x17);
+			ME_DecodeData_Spin( 6, 8,0x18);
+			ME_DecodeData_Spin(14, 8,0x18);
+			ME_DecodeData_Spin(22, 8,0x18);
+			ME_DecodeData_Spin(30, 8,0x18);
+			ME_DecodeData_Spin(38, 8,0x18);
+			break;
+		case 1://PasswordChange
+			ME_DecodeData_Spin( 2, 4,0x29);
+			ME_DecodeData_Spin( 6, 8,0x2A);
+			ME_DecodeData_Spin(14, 8,0x2A);
+			ME_DecodeData_Spin(22, 8,0x2A);
+			ME_DecodeData_Spin(30, 8,0x2A);
+			ME_DecodeData_Spin(38, 8,0x2A);
+			break;
+		case 2://VoltageImbalance
+			ME_DecodeData_Spin( 2, 4,0x13);
+			ME_DecodeData_Spin( 6, 8,0x14);
+		
+			ME_DecodeData_Spin(14, 8,0x15);
+			ME_DecodeData_Spin(22, 8,0x15);
+			ME_DecodeData_Spin(30, 8,0x15);
+			ME_DecodeData_Spin(38, 8,0x15);	
+			ME_DecodeData_Spin(46, 8,0x15);
+		
+			ME_DecodeData_Spin(54, 8,0x16);
+			ME_DecodeData_Spin(62, 8,0x16);
+			ME_DecodeData_Spin(70, 8,0x16);	
+			ME_DecodeData_Spin(78, 8,0x16);
+			ME_DecodeData_Spin(86, 8,0x16);	
+			break;
+		case 3://PowerFailure
+			ME_DecodeData_Spin( 2, 4,0x2D);
+			ME_DecodeData_Spin( 6, 8,0x04);
+		
+			ME_DecodeData_Spin(14, 8,0x06);
+			ME_DecodeData_Spin(22, 8,0x06);
+			ME_DecodeData_Spin(30, 8,0x06);
+			ME_DecodeData_Spin(38, 8,0x06);	
+			ME_DecodeData_Spin(46, 8,0x06);
+		
+			ME_DecodeData_Spin(54, 8,0x05);
+			ME_DecodeData_Spin(62, 8,0x05);
+			ME_DecodeData_Spin(70, 8,0x05);	
+			ME_DecodeData_Spin(78, 8,0x05);
+			ME_DecodeData_Spin(86, 8,0x05);
+			break;
+		case 4://Time/DateChange
+			ME_DecodeData_Spin( 2, 4,0x19);
+			ME_DecodeData_Spin( 6, 8,0x1A);
+		
+			ME_DecodeData_Spin(14, 8,0x1B);
+			ME_DecodeData_Spin(22, 8,0x1B);
+			ME_DecodeData_Spin(30, 8,0x1B);
+			ME_DecodeData_Spin(38, 8,0x1B);	
+			ME_DecodeData_Spin(46, 8,0x1B);
+		
+			ME_DecodeData_Spin(54, 8,0x1C);
+			ME_DecodeData_Spin(62, 8,0x1C);
+			ME_DecodeData_Spin(70, 8,0x1C);	
+			ME_DecodeData_Spin(78, 8,0x1C);
+			ME_DecodeData_Spin(86, 8,0x1C);			
+			break;
+		case 5://PhaseFailure
+			ME_DecodeMessType2(0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,0x10,0x11,0x12);		
+			break;
+		case 6://ReverseRun
+			ME_DecodeMessType2(0x1D,0x1D,0x1F,0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28);
+			break;
+		case 7://ReadInstEvent1
+			ME_DecodeMessType2(0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0x3A,0x3B);
+			break;
+		case 8://ReadInstEvent2
+			ME_DecodeMessType2(0x3C,0x3D,0x3E,0x3F,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47);
+			break;
+		case 9://ReadInstEvent3
+			ME_DecodeMessType2(0x48,0x49,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F,0x50,0x51,0x52,0x53);
+			break;
+		case 10://ReadInstEvent4
+			ME_DecodeMessType2(0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0x5B,0x5C,0x5D,0x5E,0x5F);
+			break;
+		case 11://ReadInstEvent5
+			ME_DecodeMessType2(0x60,0x61,0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x6B);
+			break;
+		default:
+			break;		
+	}
+}
+void ME_DecodeData_Spin (uint16_t startPos, uint8_t dataLength, uint8_t oBIS)
+{
+	int8_t i=0;
+	
+	for (i=0;i<dataLength;i++)
+		MeterRawData[i] = UART1_Receive_Buff[startPos+i];
+	
+	MeterEventDataBuff[Get_Meter_Event.Data_Buff_Pointer_ui16++] = oBIS;
+	MeterEventDataBuff[Get_Meter_Event.Data_Buff_Pointer_ui16++] = dataLength/2;
+	for (i=dataLength-2;i>-1;i--)
+	{
+		MeterEventDataBuff[Get_Meter_Event.Data_Buff_Pointer_ui16++] = (MeterRawData[i]<<4)|(MeterRawData[i+1]);
+		i--;
+	}
+}
+void ME_DecodeEventOder (uint8_t startA,uint8_t startB,uint8_t startC,uint8_t endA,uint8_t endB,uint8_t endC)
+{
+	uint8_t temp=0,i=0,j=0;
+	
+	for (i=0;i<10;i++)
+	{
+		temp = (UART1_Receive_Buff[i+118]<<4)|(UART1_Receive_Buff[i+119]);
+		switch (temp)
+		{
+			case 1:
+				ME_ObisOderStart[j] = startA;
+				ME_ObisOderEnd[j] = endA;
+				break;
+			case 2:
+				ME_ObisOderStart[j] = startB;
+				ME_ObisOderEnd[j] = endC;
+				break;
+			case 3:
+				ME_ObisOderStart[j] = startC;
+				ME_ObisOderEnd[j] = endC;
+				break;
+			default:
+				break;
+		}
+		i++;
+		j++;
+	}
+}
+
+void ME_DecodeMessType2 (uint8_t countA,uint8_t countB,uint8_t countC,uint8_t timeA,uint8_t timeB,uint8_t timeC,
+									uint8_t startA,uint8_t startB,uint8_t startC,uint8_t endA,uint8_t endB,uint8_t endC)
+{
+	ME_DecodeEventOder(startA,startB,startC,endA,endB,endC);
+	
+	ME_DecodeData_Spin( 2, 4,countA);
+	ME_DecodeData_Spin( 6, 4,countB);
+	ME_DecodeData_Spin(10, 4,countC);
+
+	ME_DecodeData_Spin(14, 8,timeA);
+	ME_DecodeData_Spin(22, 8,timeB);
+	ME_DecodeData_Spin(30, 8,timeC);
+
+	ME_DecodeData_Spin(38, 8,ME_ObisOderStart[0]);	
+	ME_DecodeData_Spin(46, 8,ME_ObisOderStart[1]);
+	ME_DecodeData_Spin(54, 8,ME_ObisOderStart[2]);
+	ME_DecodeData_Spin(62, 8,ME_ObisOderStart[3]);
+	ME_DecodeData_Spin(70, 8,ME_ObisOderStart[4]);	
+
+	ME_DecodeData_Spin(78, 8,ME_ObisOderEnd[0]);
+	ME_DecodeData_Spin(86, 8,ME_ObisOderEnd[1]);		
+	ME_DecodeData_Spin(94, 8,ME_ObisOderEnd[2]);
+	ME_DecodeData_Spin(102, 8,ME_ObisOderEnd[3]);
+	ME_DecodeData_Spin(110, 8,ME_ObisOderEnd[4]);		
+}
+void ME_SendData (void)
+{
+	uint16_t i=0;
+	uint32_t	temp=0;
+	
+	//Send to queue
+	MeterEventDataBuff[2] = 0x00;
+	MeterEventDataBuff[3] = 0x06;
+	MeterEventDataBuff[6] = sRTC.date;
+	MeterEventDataBuff[5] = sRTC.month;
+	MeterEventDataBuff[4] = sRTC.year;
+	MeterEventDataBuff[7] = sRTC.hour;
+	MeterEventDataBuff[8] = sRTC.min;
+	MeterEventDataBuff[9] = sRTC.sec;
+	//Fill mess length to mess buff: MeterBillingDataBuff[0] -> MeterBillingDataBuff[1]
+	MeterEventDataBuff[0] = (Get_Meter_Event.Data_Buff_Pointer_ui16+1) & 0x00FF;
+	MeterEventDataBuff[1] = ((Get_Meter_Event.Data_Buff_Pointer_ui16+1) >> 8) & 0x00FF;
+	//Generate checksum byte
+	for (i=0;i<Get_Meter_Event.Data_Buff_Pointer_ui16;i++)
+		temp += MeterEventDataBuff[i];
+	
+	temp = temp & 0x000000FF;
+	
+	MeterEventDataBuff[Get_Meter_Event.Data_Buff_Pointer_ui16] = (uint8_t)temp;
+	
+	for (i=Get_Meter_Event.Data_Buff_Pointer_ui16+1;i<MEventBuffLength;i++)
+		MeterEventDataBuff[i] = 0xFF;
+		
+	//Push data to queue
+	Queue_Meter_Event.Mess_Direct_ui8 = 1;
+	Queue_Meter_Event.str_Flash.Length_u16 = Get_Meter_Event.Data_Buff_Pointer_ui16+1;
+	Queue_Meter_Event.Mess_Status_ui8 = 0;
+	Queue_Meter_Event.Mess_Type_ui8 = DATA_EVEN_METER;
+	Queue_Meter_Event.str_Flash.Data_a8 = &MeterEventDataBuff[0];
+	
+	xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_Event,100);
+	HAL_UART_Transmit(&huart1,&MeterEventDataBuff[0],Get_Meter_Event.Data_Buff_Pointer_ui16,500);
+	Get_Meter_Event.Data_Buff_Pointer_ui16 = 0;
+}
+// 
+// 		Meter alert function
+//
+void Send_MAlert_Mess (void)
+{
+	uint8_t i=0,temp=0;
+	uint8_t mMess[22];
+	
+	temp = MeterAlertMessIDTable[Get_Meter_Alert.Mess_Step_ui8];
+	for (i=0;i<ELSTER_MInfo_Table[temp][22];i++)
+		mMess[i] = ELSTER_MInfo_Table[temp][i];
+	HAL_UART_Transmit(&huart1,mMess,ELSTER_MInfo_Table[temp][22],100);
+}
+void RMA_Extract_Data(void)
+{
+//	if (MeterInfoMessIDTable[Get_Meter_Info.Mess_Step_ui8]==1)
+//	{
+		//ELSTER_Decode_byte(UART1_Receive_Buff,2,UART1_Control.Mess_Length_ui16-4);
+		
+		switch (Get_Meter_Info.Mess_Step_ui8)
+		{
+			case 5://VoltagePhaseA,B,C
+				Meter_ReadForAlert.Vot_PhaseA_ui32=RMA_Converse_Data( 2,14,100);
+				Meter_ReadForAlert.Vot_PhaseB_ui32=RMA_Converse_Data(16,14,100);
+				Meter_ReadForAlert.Vot_PhaseC_ui32=RMA_Converse_Data(30,14,100);
+				break;
+			case 11://CurrentPhaseA,B,C
+				Meter_ReadForAlert.Cur_PhaseA_ui32=RMA_Converse_Data( 2,14,100);
+				Meter_ReadForAlert.Cur_PhaseB_ui32=RMA_Converse_Data(16,14,100);
+				Meter_ReadForAlert.Cur_PhaseC_ui32=RMA_Converse_Data(30,14,100);
+				break;
+			case 17://FrequencyPhaseA,B,C
+				Meter_ReadForAlert.FreqA_ui32=RMA_Converse_Data( 2,14,100);
+				Meter_ReadForAlert.FreqB_ui32=RMA_Converse_Data(16,14,100);
+				Meter_ReadForAlert.FreqC_ui32=RMA_Converse_Data(30,14,100);
+				break;
+			case 23://PowerFactorPhaseA,B,C,Total
+				Meter_ReadForAlert.Power_FactorA_ui32=RMA_Converse_Data( 2,14,1000);
+				Meter_ReadForAlert.Power_FactorB_ui32=RMA_Converse_Data(16,14,1000);
+				Meter_ReadForAlert.Power_FactorC_ui32=RMA_Converse_Data(30,14,1000);
+				Meter_ReadForAlert.Power_Factor_ui32=RMA_Converse_Data(44,14,1000);			
+				break;
+			default:
+				break;
+		}
+//	}
+}
+uint32_t RMA_Converse_Data (uint8_t startPos,uint8_t dataLength,uint16_t serverScale)
+{
+	uint8_t i=0;
+	uint32_t mReVal=0;
+	uint32_t Temp = 0; // Scale
+	for (i=0;i<dataLength;i++)
+		MeterRawData[i] = UART1_Receive_Buff[startPos+i];
+	
+//	if (MeterRawData[0] != 0x08)  // Gia tri am, van tinh bt
+//	{
+		if ((MeterRawData[2] == 0x0F)&&(MeterRawData[3] == 0x0F))
+			mReVal=0;
+		else
+		{
+//			mReVal = MeterRawData[2]*100000000000 + 
+//					 MeterRawData[3]*10000000000 + 
+			mReVal = MeterRawData[4]*1000000000 + // bo qua 4 byte dau (0->3)
+					 MeterRawData[5]*100000000 + 
+					 MeterRawData[6]*10000000 + 
+					 MeterRawData[7]*1000000 + 
+					 MeterRawData[8]*100000 + 
+					 MeterRawData[9]*10000 + 
+					MeterRawData[10]*1000 + 
+					MeterRawData[11]*100 + 
+					MeterRawData[12]*10 + 
+					MeterRawData[13];
+			Temp = 10000/serverScale;
+			mReVal = mReVal/Temp;
+		}
+//	}
+//	else
+//		mReVal=0;
+	
+	return mReVal;
+}
+void Rated_Compare_and_WriteData (uint8_t compare_type, uint32_t mVal, uint32_t ratedVal, uint8_t obis)
+{
+	//Compare type: 0-under 1-over
+	switch (compare_type)
+	{
+		case 0:
+			if (mVal <= ratedVal)
+			{
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = obis;
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = 0x01;
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = 0x01;
+				Meter_ReadForAlert.Count++;
+			}
+			else
+			{
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = obis;
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = 0x01;
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = 0x00;				
+			}
+			break;
+		case 1:
+			if (mVal >= ratedVal)
+			{
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = obis;
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = 0x01;
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = 0x01;
+				Meter_ReadForAlert.Count++;
+			}
+			else
+			{
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = obis;
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = 0x01;
+				MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = 0x00;				
+			}			
+			break;
+		default:
+			break;
+	}
+}
+void RMA_Check_Alert (void)
+{
+	uint32_t	i=0;
+	uint32_t	temp=0;
+	uint32_t rated_average_current = 0;
+	
+	//Reset count
+	Meter_ReadForAlert.Count = 0;
+	
+	//DCUTime
+	MeterAlertDataBuff[2] = 0x00;
+	MeterAlertDataBuff[3] = 0x06;
+	MeterAlertDataBuff[6] = sRTC.date;
+	MeterAlertDataBuff[5] = sRTC.month;
+	MeterAlertDataBuff[4] = sRTC.year;
+	MeterAlertDataBuff[7] = sRTC.hour;
+	MeterAlertDataBuff[8] = sRTC.min;
+	MeterAlertDataBuff[9] = sRTC.sec;
+	
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Vot_PhaseA_ui32,Meter_AlertSetting.Vot_PhaseA_Under_ui32,0x01);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Vot_PhaseB_ui32,Meter_AlertSetting.Vot_PhaseB_Under_ui32,0x03);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Vot_PhaseC_ui32,Meter_AlertSetting.Vot_PhaseC_Under_ui32,0x05);
+	Rated_Compare_and_WriteData (OVER_COMP ,Meter_ReadForAlert.Vot_PhaseA_ui32,Meter_AlertSetting.Vot_PhaseA_Over_ui32, 0x02);
+	Rated_Compare_and_WriteData (OVER_COMP ,Meter_ReadForAlert.Vot_PhaseB_ui32,Meter_AlertSetting.Vot_PhaseB_Over_ui32, 0x04);
+	Rated_Compare_and_WriteData (OVER_COMP ,Meter_ReadForAlert.Vot_PhaseC_ui32,Meter_AlertSetting.Vot_PhaseC_Over_ui32, 0x06);
+	
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Vot_PhaseA_ui32,Meter_AlertSetting.Vot_Fail_ui32,0x1E);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Vot_PhaseB_ui32,Meter_AlertSetting.Vot_Fail_ui32,0x1F);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Vot_PhaseC_ui32,Meter_AlertSetting.Vot_Fail_ui32,0x20);
+	
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Cur_PhaseA_ui32,Meter_AlertSetting.Curr_Fail_ui32,0x21);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Cur_PhaseB_ui32,Meter_AlertSetting.Curr_Fail_ui32,0x22);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Cur_PhaseC_ui32,Meter_AlertSetting.Curr_Fail_ui32,0x23);
+	
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.FreqA_ui32,Meter_AlertSetting.Freq_Under_ui32, 0x24);
+	Rated_Compare_and_WriteData (OVER_COMP ,Meter_ReadForAlert.FreqA_ui32,Meter_AlertSetting.Freq_Over_ui32 , 0x25);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.FreqB_ui32,Meter_AlertSetting.Freq_Under_ui32, 0x26);
+	Rated_Compare_and_WriteData (OVER_COMP ,Meter_ReadForAlert.FreqB_ui32,Meter_AlertSetting.Freq_Over_ui32 , 0x27);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.FreqC_ui32,Meter_AlertSetting.Freq_Under_ui32, 0x28);
+	Rated_Compare_and_WriteData (OVER_COMP ,Meter_ReadForAlert.FreqC_ui32,Meter_AlertSetting.Freq_Over_ui32 , 0x29);
+	
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Power_Factor_ui32 ,Meter_AlertSetting.Power_Factor_Under_ui32, 0x0F);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Power_FactorA_ui32,Meter_AlertSetting.Power_Factor_Under_ui32, 0x10);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Power_FactorB_ui32,Meter_AlertSetting.Power_Factor_Under_ui32, 0x11);
+	Rated_Compare_and_WriteData (UNDER_COMP,Meter_ReadForAlert.Power_FactorC_ui32,Meter_AlertSetting.Power_Factor_Under_ui32, 0x12);
+	
+	Rated_Compare_and_WriteData (OVER_COMP,Meter_ReadForAlert.Cur_PhaseA_ui32,Meter_AlertSetting.Cur1Phase_Over_Rated_ui32, 0x13);
+	Rated_Compare_and_WriteData (OVER_COMP,Meter_ReadForAlert.Cur_PhaseB_ui32,Meter_AlertSetting.Cur1Phase_Over_Rated_ui32, 0x14);
+	Rated_Compare_and_WriteData (OVER_COMP,Meter_ReadForAlert.Cur_PhaseC_ui32,Meter_AlertSetting.Cur1Phase_Over_Rated_ui32, 0x15);
+	
+	Rated_Compare_and_WriteData (OVER_COMP,(Meter_ReadForAlert.Cur_PhaseA_ui32 + Meter_ReadForAlert.Cur_PhaseB_ui32)/2,Meter_AlertSetting.Cur2Phase_Over_Rated_ui32, 0x16);
+	Rated_Compare_and_WriteData (OVER_COMP,(Meter_ReadForAlert.Cur_PhaseC_ui32 + Meter_ReadForAlert.Cur_PhaseB_ui32)/2,Meter_AlertSetting.Cur2Phase_Over_Rated_ui32, 0x17);
+	Rated_Compare_and_WriteData (OVER_COMP,(Meter_ReadForAlert.Cur_PhaseA_ui32 + Meter_ReadForAlert.Cur_PhaseC_ui32)/2,Meter_AlertSetting.Cur2Phase_Over_Rated_ui32, 0x18);
+	
+	rated_average_current = ((100 - Meter_AlertSetting.Cur1Phase_Under_Average_ui32)*(Meter_ReadForAlert.Cur_PhaseA_ui32 + Meter_ReadForAlert.Cur_PhaseB_ui32 + Meter_ReadForAlert.Cur_PhaseC_ui32))/300;
+	Rated_Compare_and_WriteData(UNDER_COMP,Meter_ReadForAlert.Cur_PhaseA_ui32,rated_average_current,0x19);
+	Rated_Compare_and_WriteData(UNDER_COMP,Meter_ReadForAlert.Cur_PhaseB_ui32,rated_average_current,0x1A);
+	Rated_Compare_and_WriteData(UNDER_COMP,Meter_ReadForAlert.Cur_PhaseC_ui32,rated_average_current,0x1B);
+	
+	MSetting_Insert_Read_Data(0x70,Meter_ReadForAlert.Vot_PhaseA_ui32);
+	MSetting_Insert_Read_Data(0x71,Meter_ReadForAlert.Vot_PhaseB_ui32);
+	MSetting_Insert_Read_Data(0x72,Meter_ReadForAlert.Vot_PhaseC_ui32);
+	MSetting_Insert_Read_Data(0x73,Meter_ReadForAlert.Cur_PhaseA_ui32);
+	MSetting_Insert_Read_Data(0x74,Meter_ReadForAlert.Cur_PhaseB_ui32);
+	MSetting_Insert_Read_Data(0x75,Meter_ReadForAlert.Cur_PhaseC_ui32);
+	MSetting_Insert_Read_Data(0x7B,Meter_ReadForAlert.FreqA_ui32);
+	MSetting_Insert_Read_Data(0x7C,Meter_ReadForAlert.FreqB_ui32);
+	MSetting_Insert_Read_Data(0x7D,Meter_ReadForAlert.FreqC_ui32);
+	MSetting_Insert_Read_Data(0x77,Meter_ReadForAlert.Power_Factor_ui32);
+	MSetting_Insert_Read_Data(0x78,Meter_ReadForAlert.Power_FactorA_ui32);
+	MSetting_Insert_Read_Data(0x79,Meter_ReadForAlert.Power_FactorB_ui32);
+	MSetting_Insert_Read_Data(0x7A,Meter_ReadForAlert.Power_FactorC_ui32);
+	
+	//Fill mess length to mess buff: MeterInfoDataBuff[0] -> MeterInfoDataBuff[1]
+	MeterAlertDataBuff[0] = (Get_Meter_Alert.Data_Buff_Pointer_ui16+1) & 0x00FF;
+	MeterAlertDataBuff[1] = ((Get_Meter_Alert.Data_Buff_Pointer_ui16+1) >> 8) & 0x00FF;
+	//Generate checksum byte
+	for (i=0;i<Get_Meter_Alert.Data_Buff_Pointer_ui16;i++)
+		temp += MeterAlertDataBuff[i];
+	
+	temp = temp & 0x000000FF;
+	
+	MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16] = (uint8_t)temp;
+	
+	for (i=Get_Meter_Alert.Data_Buff_Pointer_ui16+1;i<256;i++)
+		MeterAlertDataBuff[i] = 0xFF;
+		
+	if (Meter_ReadForAlert.Count > 0)
+	{
+		//Push data to queue
+		Queue_Meter_Alert.Mess_Direct_ui8 = 1;
+		Queue_Meter_Alert.str_Flash.Length_u16 = Get_Meter_Alert.Data_Buff_Pointer_ui16+1;
+		Queue_Meter_Alert.Mess_Status_ui8 = 0;
+		Queue_Meter_Alert.Mess_Type_ui8 = DATA_EVEN_DCUF;
+		Queue_Meter_Alert.str_Flash.Data_a8 = &MeterAlertDataBuff[0];
+		
+		xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_Alert,100);
+		
+		Meter_ReadForAlert.Last_Alarm = 1;
+	}
+	else
+	{
+		if (Meter_ReadForAlert.Last_Alarm == 1)
+		{
+			//Push data to queue
+			Queue_Meter_Alert.Mess_Direct_ui8 = 1;
+			Queue_Meter_Alert.str_Flash.Length_u16 = Get_Meter_Alert.Data_Buff_Pointer_ui16+1;
+			Queue_Meter_Alert.Mess_Status_ui8 = 0;
+			Queue_Meter_Alert.Mess_Type_ui8 = DATA_EVEN_DCUF;
+			Queue_Meter_Alert.str_Flash.Data_a8 = &MeterAlertDataBuff[0];
+			
+			xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_Alert,100);
+			
+			Meter_ReadForAlert.Last_Alarm = 0;
+		}
+	}
+	
+	Get_Meter_Alert.Data_Buff_Pointer_ui16 = 10;	
+}
+
+void MSetting_Insert_Read_Data (uint8_t obis, uint32_t value)
+{
+    MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = obis;
+    MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = 0x04;
+    MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = (uint8_t)(value>>24);
+    MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = (uint8_t)(value>>16);
+    MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = (uint8_t)(value>>8);
+    MeterAlertDataBuff[Get_Meter_Alert.Data_Buff_Pointer_ui16++] = (uint8_t)(value);
+}
+
+void MSetting_Puss_Data (uint8_t obis, uint8_t start_pos, uint32_t value)
+{
+	MeterAlertSetting[start_pos] = obis;
+	MeterAlertSetting[start_pos+1] = 0x04;
+	MeterAlertSetting[start_pos+5] = (uint8_t)(value);
+	MeterAlertSetting[start_pos+4] = (uint8_t)(value>>8);
+	MeterAlertSetting[start_pos+3] = (uint8_t)(value>>16);
+	MeterAlertSetting[start_pos+2] = (uint8_t)(value>>24);
+}
+
+void Meter_Setting_To_Server (void)
+{
+	MSetting_Puss_Data (0x00,0, Meter_AlertSetting.Vot_PhaseA_Under_ui32);
+	MSetting_Puss_Data (0x01,6, Meter_AlertSetting.Vot_PhaseA_Over_ui32);
+	MSetting_Puss_Data (0x02,12,Meter_AlertSetting.Vot_PhaseB_Under_ui32);
+	MSetting_Puss_Data (0x03,18,Meter_AlertSetting.Vot_PhaseB_Over_ui32);
+	MSetting_Puss_Data (0x04,24,Meter_AlertSetting.Vot_PhaseC_Under_ui32);
+	MSetting_Puss_Data (0x05,30,Meter_AlertSetting.Vot_PhaseC_Over_ui32);
+	MSetting_Puss_Data (0x06,36,Meter_AlertSetting.Freq_Under_ui32);
+	MSetting_Puss_Data (0x07,42,Meter_AlertSetting.Freq_Over_ui32);
+	MSetting_Puss_Data (0x08,48,Meter_AlertSetting.Power_Factor_Under_ui32);
+	MSetting_Puss_Data (0x09,54,Meter_AlertSetting.Cur1Phase_Over_Rated_ui32);
+	MSetting_Puss_Data (0x0A,60,Meter_AlertSetting.Cur2Phase_Over_Rated_ui32);
+	MSetting_Puss_Data (0x0B,66,Meter_AlertSetting.Cur1Phase_Under_Average_ui32);
+}
+
+// 
+// Meter loadprofile function
+//
+void Send_MLoadProfile_Mess (void)
+{
+	uint8_t tempArr[4]={0x00,0x00,0x00,0x00};
+	uint8_t i=0,tempCS=0;
+	
+	switch (Get_Meter_LProf.Mess_Step_ui8)
+	{
+		case 0:
+			if (RMLP_NumDay > 100) RMLP_NumDay = 1;
+			tempArr[0] = (RMLP_NumDay&0x0F)>>4;
+			tempArr[1] = (RMLP_NumDay&0x0F);
+			tempArr[2] = ((RMLP_NumDay>>4)&0x0F)>>4;
+			tempArr[3] = ((RMLP_NumDay>>4)&0x0F);
+			ELSTER_Encode_byte(tempArr,0,4);
+			for (i=0;i<4;i++)
+				RMLP_First_Mess[i+11] = tempArr[i];
+			for (i=1;i<17;i++)
+				tempCS = tempCS^RMLP_First_Mess[i];
+			RMLP_First_Mess[17] = tempCS;
+			
+			HAL_UART_Transmit(&huart1,RMLP_First_Mess,18,100);
+			break;
+		case 1:
+			HAL_UART_Transmit(&huart1,RMLP_Second_Mess,16,100);
+			break;
+		default:
+			tempArr[0] = 0x00;
+			tempArr[1] = 0x00;
+			tempArr[2] = (Get_Meter_LProf.Mess_Step_ui8-1)>>4;
+			tempArr[3] = (Get_Meter_LProf.Mess_Step_ui8-1)&0x0F;
+			ELSTER_Encode_byte(tempArr,0,4);
+			for (i=0;i<4;i++)
+				RMLP_GetData_Mess[i+6] = tempArr[i];
+			for (i=1;i<15;i++)
+				tempCS = tempCS^RMLP_GetData_Mess[i];
+			RMLP_GetData_Mess[15] = tempCS;
+			
+			HAL_UART_Transmit(&huart1,RMLP_GetData_Mess,16,100);
+			break;
+	}
+}
+
+void RMLP_Extract_Data(void)
+{
+	uint8_t i=0;
+	uint8_t temp=0;
+	
+	switch (Get_Meter_LProf.Mess_Step_ui8)
+	{
+		case 0:
+			break;
+		case 1:
+			break;
+		default:
+			ELSTER_Decode_byte(UART1_Receive_Buff,2,UART1_Control.Mess_Length_ui16-4);
+			for (i=2;i<UART1_Control.Mess_Length_ui16-2;i++)
+			{
+				temp = (UART1_Receive_Buff[i]<<4)|(UART1_Receive_Buff[i+1]);
+				ELSTER_TempBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = temp;
+				i++;
+			}
+			break;
+	}
+}
+
+void MLProf_SendData (void)
+{
+	uint16_t 	Data_Length = 0,i=10,j=0;
+	uint8_t		Data_OBIS = 0;
+	uint32_t	temp=0;
+	
+	Data_Length = Get_Meter_LProf.Data_Buff_Pointer_ui16;
+	Get_Meter_LProf.Data_Buff_Pointer_ui16 = 10;
+	Get_Meter_LProf.Flag_ui8 = 0;
+
+
+	while (i<Data_Length)
+	{
+		Data_OBIS = ELSTER_TempBuff[i];
+		switch (Data_OBIS)
+		{
+			case 0xE4:
+				Get_Meter_LProf.Flag_ui8++;
+				if (Get_Meter_LProf.Flag_ui8 == 2)
+					break;
+				meterPeriod_Mins = Cal_LPPeriod(ELSTER_TempBuff[i+7]);
+				meterTimeStamp = 0;
+				for (j=0;j<4;j++)
+					meterTimeStamp = meterTimeStamp|(ELSTER_TempBuff[i+j+1]<<(j*8));
+				Epoch_to_date_time_Elster(ptrMeterLPTime,meterTimeStamp);
+				if ((meterLPTime.min%meterPeriod_Mins) == 0)
+					i += 8;
+				else
+				{
+					Round_MLPTime();
+					i += 21;
+				}
+				break;
+			case 0xE5://Co dien
+				if ((ELSTER_TempBuff[i+5]) == 0xE6)
+				{
+					i += 5;
+					break;
+				}
+				else
+				{
+					meterTimeStamp = 0;
+					for (j=0;j<4;j++)
+						meterTimeStamp = meterTimeStamp|(ELSTER_TempBuff[i+j+1]<<(j*8));
+					Epoch_to_date_time_Elster(ptrMeterLPTime,meterTimeStamp);
+					if (((meterLPTime.min%meterPeriod_Mins)==0)&&(meterLPTime.sec==0))
+						i += 5;
+					else
+					{
+						Round_MLPTime();
+						i += 18;
+					}
+				}
+				break;
+			case 0xE6://Mat dien
+				if ((ELSTER_TempBuff[i+5]) == 0xE5)
+					i += 5;
+				else
+					i += 18;
+				break;
+			case 0xFF:
+				Get_Meter_LProf.Flag_ui8 = 2;
+				break;
+			default:
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x1B;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x01;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x05;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = meterLPTime.year;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = meterLPTime.month;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = meterLPTime.date;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = meterLPTime.hour;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = meterLPTime.min;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x84;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x03;
+				for (j=0;j<3;j++)
+					MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = ELSTER_TempBuff[i+1+j];
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x85;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x03;
+				for (j=0;j<3;j++)
+					MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = ELSTER_TempBuff[i+4+j];			
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x86;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x03;
+				for (j=0;j<3;j++)
+					MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = ELSTER_TempBuff[i+7+j];			
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x87;
+				MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = 0x03;
+				for (j=0;j<3;j++)
+					MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16++] = ELSTER_TempBuff[i+10+j];			
+				i += 13;
+				
+				//Calculate time for next record
+				meterTimeStamp += meterPeriod_Mins*60;
+				Epoch_to_date_time_Elster(ptrMeterLPTime,meterTimeStamp);
+				break;
+		}
+		if (Get_Meter_LProf.Flag_ui8 == 2)
+		{
+			Get_Meter_LProf.Flag_ui8 = 0;
+			break;
+		}
+	};
+	
+	if (Get_Meter_LProf.Error_ui8 != 0x10)
+	{
+		MeterLProfDataBuff[2] = 0x00;
+		MeterLProfDataBuff[3] = 0x06;
+		MeterLProfDataBuff[6] = sRTC.date;
+		MeterLProfDataBuff[5] = sRTC.month;
+		MeterLProfDataBuff[4] = sRTC.year;
+		MeterLProfDataBuff[7] = sRTC.hour;
+		MeterLProfDataBuff[8] = sRTC.min;
+		MeterLProfDataBuff[9] = sRTC.sec;
+		
+		//Fill mess length to mess buff: MeterEventDataBuff[0] -> MeterEventDataBuff[1]
+		MeterLProfDataBuff[0] = (Get_Meter_LProf.Data_Buff_Pointer_ui16+1) & 0x00FF;
+		MeterLProfDataBuff[1] = ((Get_Meter_LProf.Data_Buff_Pointer_ui16+1) >> 8) & 0x00FF;
+		//Generate checksum byte
+		temp = 0;
+		for (i=0;i<Get_Meter_LProf.Data_Buff_Pointer_ui16;i++)
+			temp += MeterLProfDataBuff[i];
+		
+		temp = temp & 0x000000FF;
+		
+		MeterLProfDataBuff[Get_Meter_LProf.Data_Buff_Pointer_ui16] = (uint8_t)temp;
+		
+		for (i=Get_Meter_LProf.Data_Buff_Pointer_ui16+1;i<MLProfBuffLength;i++)
+			MeterLProfDataBuff[i] = 0xFF;
+		
+		//Push data to queue
+		Queue_Meter_LProf.Mess_Direct_ui8 = 1;
+		Queue_Meter_LProf.str_Flash.Length_u16 = Get_Meter_LProf.Data_Buff_Pointer_ui16+1;
+		Queue_Meter_LProf.Mess_Status_ui8 = 0;
+		Queue_Meter_LProf.Mess_Type_ui8 = DATA_LOAD_PROFILE;
+		Queue_Meter_LProf.str_Flash.Data_a8 = &MeterLProfDataBuff[0];
+		
+		xQueueSend(qMeter_SIM900Handle,(void *)&ptrQueue_Meter_LProf,100);
+		
+		Get_Meter_LProf.Data_Buff_Pointer_ui16 = 10;		
+	}
+}
+
+void Epoch_to_date_time_Elster(ST_TIME_FORMAT* date_time,uint32_t meterTS)
+{
+	unsigned int years;
+	unsigned int year;
+	unsigned int month;
+	uint32_t	 epoch;
+	
+	epoch = meterTS - 946684800; //from 2000
+		
+    date_time->sec = epoch%60; epoch /= 60;
+    date_time->min = epoch%60; epoch /= 60;
+    date_time->hour= epoch%24; epoch /= 24;
+
+    years = epoch/(365*4+1)*4; epoch %= 365*4+1;
+
+    for (year=3; year>0; year--)
+    {
+        if (epoch >= days[year][0])
+            break;
+    }
+
+    for (month=11; month>0; month--)
+    {
+        if (epoch >= days[year][month])
+            break;
+    }
+
+    date_time->year  = years+year;
+    date_time->month = month+1;
+    date_time->date  = epoch-days[year][month]+1;
+}
+
+uint8_t Cal_LPPeriod (uint8_t mPer)
+{
+	uint8_t periodIdx=0,mReVal=0;
+	
+	periodIdx = mPer & 0x0F;
+	mReVal = aLoadprofileDataPeriod[periodIdx];
+	
+	return mReVal;
+}
+
+void Round_MLPTime(void)
+{
+	uint8_t spareMins=0,spareSec=0;
+	
+	spareSec = meterTimeStamp%60;
+	spareMins = meterLPTime.min%meterPeriod_Mins;
+	meterTimeStamp -= spareSec;
+	meterTimeStamp += (meterPeriod_Mins-spareMins)*60;
+	Epoch_to_date_time_Elster(ptrMeterLPTime,meterTimeStamp);
+}
+//
+void CheckResetReadMeter(uint32_t Timeout)
+{
+	// Reset neu doc sai cong to
+    if ((sDCU.Status_Meter_u8 == 0) &&
+            (Check_Time_Out(sDCU.LandMark_Count_Reset_Find_Meter,600000) == TRUE)) // 10p
+    {
+        osDelay(Timeout); // 5p
+        Read_Meter_ID_Success = Get_Meter_ID();
+        if(Read_Meter_ID_Success != 1) // Reset MCU
+        {
+            __disable_irq();
+            NVIC_SystemReset(); // Reset MCU	
+        }
+        else
+            sDCU.LandMark_Count_Reset_Find_Meter = RT_Count_Systick_u32;
+    }
+}
+
+
+//2020 sua them dong goi push data 103EVN HES
+
+
+void Write_Header_TSVH_Push103 (void)
+{
+    //STX
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = STX;
+    //obiscode Intan
+    Copy_String_2(&Get_Meter_Info.Str_Payload, &Str_OB_INTAN);
+
+    //DCUID
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = '(';
+    Copy_String_2(&Get_Meter_Info.Str_Payload, &sDCU.sDCU_id); 
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = ')';
+    
+    //ID Meter
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = '(';
+    Copy_String_2(&Get_Meter_Info.Str_Payload, &sDCU.sMeter_id_now);  
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = ')';
+
+    //Meter type
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = '(';
+    Copy_String_2(&Get_Meter_Info.Str_Payload, &Str_MeterType_u8[sDCU.MeterType]);  
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = ')';
+    
+    //Timlabel
+    //numqty
+    Get_Meter_Info.PosNumqty = Get_Meter_Info.Str_Payload.Length_u16;
+    //Obis
+    Get_Meter_Info.Pos_Obis_Inbuff = Get_Meter_Info.Str_Payload.Length_u16;
+    
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = 0x0D;
+    *(Get_Meter_Info.Str_Payload.Data_a8 + Get_Meter_Info.Str_Payload.Length_u16++) = 0x0A;
+    //Data
+    Get_Meter_Info.Pos_Data_Inbuff = Get_Meter_Info.Str_Payload.Length_u16;
+}
+
+
+
+
+void Write_Header_His_Push103 (void)
+{
+    //STX
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = STX;
+    //obiscode Intan
+    Copy_String_2(&Get_Meter_Billing.Str_Payload, &Str_OB_CHOT);
+
+    //DCUID
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = '(';
+    Copy_String_2(&Get_Meter_Billing.Str_Payload, &sDCU.sDCU_id); 
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = ')';
+    
+    //ID Meter
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = '(';
+    Copy_String_2(&Get_Meter_Billing.Str_Payload, &sDCU.sMeter_id_now);  
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = ')';
+
+    //Meter type
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = '(';
+    Copy_String_2(&Get_Meter_Billing.Str_Payload, &Str_MeterType_u8[sDCU.MeterType]);  
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = ')';
+    
+    //Timlabel
+    //numqty
+    Get_Meter_Billing.PosNumqty = Get_Meter_Billing.Str_Payload.Length_u16;
+    //Obis
+    Get_Meter_Billing.Pos_Obis_Inbuff = Get_Meter_Billing.Str_Payload.Length_u16;
+    
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = 0x0D;
+    *(Get_Meter_Billing.Str_Payload.Data_a8 + Get_Meter_Billing.Str_Payload.Length_u16++) = 0x0A;
+    //Data
+    Get_Meter_Billing.Pos_Data_Inbuff = Get_Meter_Billing.Str_Payload.Length_u16;
+}
+
+
+
+void TuTi_ExtractDataFunc (void)
+{
+    if ((MeterInfoMessIDTable[Get_Meter_TuTi.Mess_Step_ui8]==1)||(MeterInfoMessIDTable[Get_Meter_TuTi.Mess_Step_ui8]>10))
+	{
+        ELSTER_Decode_byte(UART1_Receive_Buff,2,UART1_Control.Mess_Length_ui16-4);   //chuyen sang 4 bit sau la giá tri HEX.
+        switch (Get_Meter_TuTi.Mess_Step_ui8)
+        {
+            case 1://Tu-TuM
+                TuTi_DecodeData_Spin( 2, 8, SCALE_TU_TI); // ( 4, 6,0x42)   
+                TuTi_DecodeData_Spin(10, 6, SCALE_TU_TI);	// (12, 4,0x65)			
+                break;
+            case 58://Ti-TiM
+                TuTi_DecodeData_Spin( 2, 8, SCALE_TU_TI);  // 4 6     
+                TuTi_DecodeData_Spin(10, 4, SCALE_TU_TI);	 // 12 2	
+        }
+    }
+}
+		
+void TuTi_SendData(void)
+{
+    *(Get_Meter_TuTi.Str_Payload.Data_a8 + Get_Meter_TuTi.Str_Payload.Length_u16++) = '(';
+    Pack_HEXData_Frame_Uint64(&Get_Meter_TuTi.Str_Payload, (uint64_t) sDCU.He_So_Nhan, SCALE_HE_SO_NHAN); 
+    *(Get_Meter_TuTi.Str_Payload.Data_a8 + Get_Meter_TuTi.Str_Payload.Length_u16++) = ')';
+}
+
+void Send_MTuTi_Mess (void)
+{
+	uint8_t i=0,temp=0;
+	uint8_t mMess[22];
+	
+	temp = MeterTuTiIDTable[Get_Meter_TuTi.Mess_Step_ui8];
+	for (i=0;i<ELSTER_MInfo_Table[temp][22];i++)
+		mMess[i] = ELSTER_MInfo_Table[temp][i];
+	HAL_UART_Transmit(&huart1,mMess,ELSTER_MInfo_Table[temp][22],100);
+}
+
+
+void TuTi_DecodeData_Spin (uint8_t startPos, uint8_t dataLength, uint8_t ScaleNum)
+{
+	int8_t i=0;
+    uint8_t Buff_data[20];
+    uint8_t BuffPayload[30];
+    uint8_t Flag_ZeroFirst = 0;
+    truct_String Str_Data_Write = {&Buff_data[0], 0};
+    truct_String StrAdd_To_payload = {&BuffPayload[0], 0};
+    uint8_t   aTempData[16] = {0};
+    
+	for (i=0;i<dataLength;i++)
+		MeterRawData[i] = UART1_Receive_Buff[startPos+i];
+	
+    for (i=dataLength-1; i>-1;i-=2)
+	{
+		aTempData[dataLength-1-i] =  MeterRawData[i-1];
+		aTempData[dataLength-i] =  MeterRawData[i];
+	}
+    
+    
+    for (i=2;i<dataLength;i++)
+    {
+        if(Flag_ZeroFirst == 0)
+        {
+            if(aTempData[i] == 0) 
+              continue;
+            else Flag_ZeroFirst = 1;
+        }
+
+        *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = aTempData[i]; 
+    }
+    if(Flag_ZeroFirst == 0) *(Str_Data_Write.Data_a8 + Str_Data_Write.Length_u16++) = '0';   //neu gia tri deu la so 0 thi ghi 1 so 0 vao Buff
+    
+    //them dau '.' vao vi tri tuong ung voi scale
+    AddPoint_to_StringDec(&Str_Data_Write, ScaleNum);
+    
+    //copy ca chuoi du lieu bao gom ca  ().
+    if(startPos == 10)  //Neu la Tum va Tim   
+        *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '/';
+    else
+        *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = '(';
+    
+    for(i = 0; i < Str_Data_Write.Length_u16; i++)
+      *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = *(Str_Data_Write.Data_a8 + i) ;
+    
+    if(startPos != 2) //neu khac Tu Ti thi có ')'. Còn neu la Tu va Ti thi k co ')'
+        *(StrAdd_To_payload.Data_a8 + StrAdd_To_payload.Length_u16++) = ')';
+    
+    Copy_String_2(&Get_Meter_TuTi.Str_Payload , &StrAdd_To_payload);
+}
+
+
+
+//Ham nhan cac byte là time quy doi thanh second. Sau dó tính toán lai ta sRTC
+void DecodeData_DateTime_By_Second (uint8_t startPos, uint8_t dataLength)
+{
+	
+}
+
+
+
+
+
+
+
+
