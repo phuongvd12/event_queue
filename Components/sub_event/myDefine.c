@@ -29,7 +29,6 @@ uint8_t myOsDelay(uint16_t timeout)
 			return osFAIL;
 	}while(1);
 
-	HAL_Delay(10);
 	return osOK;
 }
 
@@ -47,7 +46,6 @@ uint8_t fmySemaphoreWait(uint8_t event, uint16_t timeout)
 			return osFAIL;
 	}while(mySemaphoreFlag);
 
-	HAL_Delay(10);
 	return osOK;
 }
 

@@ -13,8 +13,10 @@
 #include "sim_command.h"
 #include "meter_test.h"
 #include "event_driven.h"
+#include "flash_ext.h"
 #include "queue_p.h"
 #include "S25FL.h"
+
 
 #include "Init_All_Meter.h"
 #include "ELSTER_Read_Meter.h"
