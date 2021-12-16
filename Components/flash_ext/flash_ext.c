@@ -219,8 +219,7 @@ static uint8_t Flash_cmd_write_data_callback_success(void)
 static uint8_t Flash_cmd_read_data_callback_success(void)
 {
 	uint8_t message = 0;
-//	uint8_t i = 0;
-	uint8_t Dummy[1] = {DUMMY_BYTE};
+	uint8_t i = 0;
 
 	/* Send SectorAddr high nibble address byte */
 	Flash_S25FL_Send_Byte((r_flash_address & 0xFF0000) >> 16);
@@ -229,10 +228,8 @@ static uint8_t Flash_cmd_read_data_callback_success(void)
 	  /* Send SectorAddr low nibble address byte */
 	Flash_S25FL_Send_Byte(r_flash_address & 0xFF);
 
-//	for (i = 0; i < sizeof(aFlash_buff_read); i++)
-//		aFlash_buff_read[i] =  Flash_S25FL_Send_Byte(DUMMY_BYTE);
-
-	HAL_SPI_TransmitReceive(&hspi1,Dummy, aFlash_buff_read, sizeof(aFlash_buff_write), 1000);
+	for (i = 0; i < sizeof(aFlash_buff_write); i++)
+		aFlash_buff_read[i] =  Flash_S25FL_Send_Byte(DUMMY_BYTE);
 
 	fSend_String_to_Uart(&uart_debug, "\r\n Read Data OK \r\n");
 	fSend_String_to_Uart(&uart_debug, (char*)aFlash_buff_read);
