@@ -1,0 +1,7 @@
+command_line_protocol.c:20:9:cmd_generateCommand	40	static
+command_line_protocol.c:192:6:Add_Byte_2Buff	16	static
+command_line_protocol.c:198:6:Add_2byte_2Buff	16	static
+command_line_protocol.c:208:6:Add_Array_2Buff	32	static
+command_line_protocol.c:220:6:Add_Reg_2Buff	16	static
+command_line_protocol.c:232:16:isControlCharacter	16	static
+command_line_protocol.c:247:6:replaceControlCharacter	24	static

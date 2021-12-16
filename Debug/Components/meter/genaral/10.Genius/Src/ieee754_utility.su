@@ -1,0 +1,3 @@
+ieee754_utility.c:10:7:ieee754_convertToFloat	32	static
+ieee754_utility.c:31:8:ieee754_convertTodouble	40	static
+ieee754_utility.c:53:8:Convert_DoublePoint_2Double	16	static

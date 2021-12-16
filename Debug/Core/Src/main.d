@@ -40,7 +40,7 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Core/Inc/adc.h ../Core/Inc/main.h ../Core/Inc/iwdg.h \
  ../Core/Inc/rtc.h ../Core/Inc/spi.h ../Core/Inc/usart.h \
  ../Core/Inc/gpio.h \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/App/main_app.h
+ D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/App/main_app.h
 
 ../Core/Inc/main.h:
 
@@ -134,4 +134,4 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 
 ../Core/Inc/gpio.h:
 
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/App/main_app.h:
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/App/main_app.h:

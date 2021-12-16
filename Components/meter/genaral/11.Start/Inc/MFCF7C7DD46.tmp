@@ -1,0 +1,116 @@
+/*
+ * Read_Meter.h
+ *
+ *  Created on: Dec 15, 2015
+ *      Author: Administrator
+ */
+
+#include "FreeRTOS.h"
+#include "task.h"
+#include "cmsis_os.h"
+#include "stm32f3xx_hal.h"
+#include "usart.h"
+#include "variable.h"
+#include "myuart.h"
+#include "sim900.h"
+#include "t_shared.h"
+#include "t_mqtt.h"
+#include "onchipflash.h"
+#include "S25FL216K.h"
+#include "rtc.h"
+#include "adc.h"
+//#include "iwdg.h"
+
+#include "START_Init_Meter.h"
+#include "Init_All_Meter.h"
+
+#ifndef _START_READ_METER_H_
+#define _START_READ_METER_H_
+
+
+//Fix scale cua dai luong tuc thoi
+#define START_SCALE_VOLTAGE   	       		2       //V
+#define START_SCALE_CURRENT   	       		2       //A
+
+#define START_SCALE_FREQ      	       		2
+#define START_SCALE_ANGLE_PHASE	       		2
+#define START_SCALE_POW_FACTOR	       		3
+
+#define START_SCALE_ACTIVE_POW	       		4       //wh.
+#define START_SCALE_REACTIVE_POW	       	4
+#define START_SCALE_APPRENT_POW	       		4
+
+#define START_SCALE_Q_INTAN   	       		2       //var
+//Fix scale cua dai luong thanh ghi dien nang
+#define START_SCALE_TOTAL_ENERGY       	   	2  //kwh.  kvar
+//Fix scale cua dai luong thanh ghi biêu giá
+#define START_SCALE_TARRIFF          	   	    2  //kwh.  kvar
+//Fix scale cua dai luong thanh ghi công suat cuc dai
+#define START_SCALE_MAX_DEMAND       	   	    4  //kwh.  kvar
+//Fix scale cua dai luong TuTi
+#define START_SCALE_TU_TI           	   	    0  //kwh.  kvar
+#define START_SCALE_TUM_TIM           	   	    10  //kwh.  kvar
+//Fix scale cua dai luong loadprf
+#define START_SCALE_HE_SO_NHAN                0     
+
+
+//-------------------------TASK--------------------
+
+void        START_Init_Function (uint8_t type);
+uint8_t     START_Read_TSVH (void);
+uint8_t     START_Read_Intan (void);
+uint8_t     START_Read_Bill (void);
+uint8_t     START_Read_Event (uint32_t ForMin);
+uint8_t     START_Read_Lpf (void);
+uint8_t     START_Read_Infor (void);
+
+//-------------------------UART function--------------------
+uint8_t     START_GetUART2Data(void);
+void        UART2_Mess_Checksum (void);
+uint8_t     START_Connect_Meter(void);
+
+//-------------------------Meter function--------------------
+uint8_t     START_Get_Meter_ID (uint32_t Tempvalue);
+void        Scale_Meter(truct_String *Payload);
+
+uint8_t     Meter_Comm_Func (Meter_Comm_Struct *Meter_Comm, uint8_t mess_type, uint8_t *ptr_code_table, void (*ExtractDataFunc)(void), void (*DataHandle)(void));
+void        START_Fill_Mess (uint8_t message_code, uint8_t message_type);
+
+void        RMI_Extract_Data (void);
+void        RMI_Push_Mess (void);
+void        RMI_Push_Mess_Instant (void);
+
+uint32_t    Hexa_to_UInteger32 (uint8_t start_byte,uint8_t size);
+void        START_RMA_Extract_Data(void);
+void        START_RMA_Check_Alert (void);
+
+void        RMB_Extract_Data (void);
+void        RMB_Push_Mess (void);
+
+void        RME_Extract_Data (void);
+void        RME_Push_Mess (void);
+
+void        RM_Load_Prof_Func (void);
+uint8_t     UInt8_To_Hex (uint8_t mNum);
+void        RMLP_Extract_First_Adress(void);
+void        START_RMLP_Extract_Data (void);
+void        START_RMLP_Push_Mess (void);
+
+void        BubbleSort(uint8_t* nodes,uint8_t n);
+uint8_t     Find_maxtime(uint8_t *Time1, uint8_t *Time2);
+void        Swap_Data(uint8_t *Data1, uint8_t *Data2);
+
+void        START_MSetting_Puss_Data (uint8_t obis, uint8_t start_pos, uint32_t value);
+void        START_MSetting_Insert_Read_Data (uint8_t obis, uint32_t value);
+void        START_Meter_Setting_To_Server (void);
+//
+uint8_t     START_CheckResetReadMeter(uint32_t Timeout);
+uint8_t     START_Check_Meter(void);
+void        Extract_One_Element_Meter_Info (uint8_t length, uint8_t buff_pos, truct_String *oBIS, truct_String *unit, uint8_t ScaleNum );
+
+void        Extract_TuTi_Meter_Info (Meter_Comm_Struct* GetMet, uint8_t type, uint8_t length, uint8_t buff_pos, truct_String *oBIS, truct_String *unit, uint8_t ScaleNum );
+void        START_Extract_MAXDEMAND_Time (uint8_t length, uint8_t buff_pos, Struct_Maxdemand_Value *Struct_MaxD);
+void        START_Extract_MAXDEMAND_Value (uint8_t length, uint8_t buff_pos, Struct_Maxdemand_Value *Struct_MaxD);
+void        RMTuTi_Extract_Data (void);
+
+#endif /* 2_START_INC_READ_METER_H_ */

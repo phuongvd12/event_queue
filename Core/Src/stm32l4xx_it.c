@@ -23,6 +23,9 @@
 #include "stm32l4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "Init_All_Meter.h"
+
+#include "../../Components/sub_event/myDefine.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -248,10 +251,15 @@ void USART3_IRQHandler(void)
 /**
   * @brief This function handles UART4 global interrupt.
   */
+uint32_t myCount = 0;
 void UART4_IRQHandler(void)
 {
   /* USER CODE BEGIN UART4_IRQn 0 */
-
+	if(eMeter_20._f_Get_UartData != NULL) {
+		eMeter_20._f_Get_UartData();
+		myCount++;
+	}
+	UART1_Control.Systick_Last_Recerver_u32 = HAL_GetTick();
   /* USER CODE END UART4_IRQn 0 */
   HAL_UART_IRQHandler(&huart4);
   /* USER CODE BEGIN UART4_IRQn 1 */

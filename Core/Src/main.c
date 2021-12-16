@@ -87,7 +87,7 @@ int main(void)
 
   /* USER CODE BEGIN SysInit */
 /* The IWDG should be initialization before other peripherals */
-  MX_IWDG_Init();
+//  MX_IWDG_Init();
 /* Initialization step by step each of peripherals, if they are error so switches to default initialization
  * switch (step)
  * {
@@ -126,7 +126,7 @@ int main(void)
   MX_UART4_Init();
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
-  MX_IWDG_Init();
+//  MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
 
   /* USER CODE END 2 */

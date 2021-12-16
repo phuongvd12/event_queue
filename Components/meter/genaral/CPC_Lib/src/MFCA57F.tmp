@@ -1,0 +1,3658 @@
+#include "stm32f3xx_hal.h"
+#include "stm32f3xx.h"
+#include "math.h"
+
+#include "usart.h"
+#include "Init_Meter.h"
+#include "Read_Meter.h"
+
+
+#include "variable.h"
+#include "sim900.h"
+#include "t_mqtt.h"
+#include "myuart.h"
+#include "pushdata.h"
+#include "rtc.h"
+#include "onchipflash.h"
+#include "at_commands.h"
+
+uint8_t 							aTempBuff_Cmd[256] = {0};   //buff chua byte gui lenh
+
+uint8_t 							Buff_ACK[] = {'/', 'X', 'X', 'X'};   //Bat dau cua ACK 1 tu cong to ra
+truct_String						Str_ACK ={(uint8_t*) &Buff_ACK[0], 4};
+uint8_t 							Buff_RECEI_KEY[] = {SOH, 'P', '0', STX};   //Bat dau cua ACK 1 tu cong to ra
+truct_String						Str_RECEI_KEY ={(uint8_t*) &Buff_RECEI_KEY[0], 4};
+
+Meter_Var_Struct					Met_Var;
+
+
+//0 1 2.(dien ap A B C) 3 4 5 (dong dien A B C) 6 7 8.(tan so A B C) 
+//9 10 11 12(Goc lech A B C trung binh) .
+// 13, 14, 15 ,16  (he so cong suat A B C trung binh)
+uint32_t 							Buff_IntanValue[17];   //goi 1: Luu tru các dai luong co dau. ngoai tru goc lech pha la Float
+uint64_t 							Buff_IntanPower[12];   //goi 1
+uint64_t 							Buff_IntanQ[4];   //goi 1
+uint8_t 							BuffStringOutStation[MAX_LENGTH_OUTS];
+
+//30 Event. mõi event max 5 su kien start va stop time. 1 byte source + 4byte total (4byte start + 4byte stop) x n.
+uint8_t 							Buff_Event[30][45];  
+
+Struct_LastBill						LastBill;
+
+uint8_t                             Buff_PushData[1500];
+truct_String                        StrPayLoad = {&Buff_PushData[0], 0};
+
+
+uint8_t                             Buff_lpfData[1000];
+truct_String                        StrLpfData = {&Buff_lpfData[0], 0};
+
+uint8_t                             Buff_Temp_Uart[50];
+truct_String                        StrUartTemp = {&Buff_Temp_Uart[0], 0};
+struct_Get_Meter                    Get_Lpf_meter;
+struct_Get_Meter                    Get_Event_Meter;
+
+
+/*----------------Function-----------------*/
+
+//Function send cmd theo chuan IEC62056_21
+
+void CPC_IEC62056_21_Command (uint8_t Kind_Cmd, uint8_t* BuffSend, uint16_t lengthSend)
+{
+	uint8_t i=0;
+	uint8_t length = 0;
+	uint8_t Temp_BBC = 0;
+	
+	switch(Kind_Cmd)
+	{
+		case CMD_HANDSHAKE:
+			for(i = 0; i< sizeof(CPC_Handshake1); i++)
+			{	
+				aTempBuff_Cmd[i] = CPC_Handshake1[i];
+				length++;
+			}
+			break;
+		case CMD_ACK: 
+			for(i = 0; i< sizeof(CPC_Handshake2); i++)
+			{	
+				aTempBuff_Cmd[i] = CPC_Handshake2[i];
+				length++;
+			}
+			break;
+		case CMD_SEND_PASS: 
+			aTempBuff_Cmd[length++] = SOH;
+			aTempBuff_Cmd[length++] = 'P';
+			aTempBuff_Cmd[length++] = '2';
+			aTempBuff_Cmd[length++] = STX;
+			for(i = 0; i< lengthSend; i++)
+			{	
+				aTempBuff_Cmd[length++] = *(BuffSend + i);
+			}
+			aTempBuff_Cmd[length++] = ETX;
+			//them BBC vao
+			Temp_BBC = BBC_Cacul(&aTempBuff_Cmd[1], (length-1));    //lenh nay BBC bang Xor tu 'P' cho den ETX
+			aTempBuff_Cmd[length++] = Temp_BBC;
+			break;  
+		case CMD_READ: 
+			aTempBuff_Cmd[length++] = SOH;
+			aTempBuff_Cmd[length++] = 'R';
+			aTempBuff_Cmd[length++] = '1';
+			aTempBuff_Cmd[length++] = STX;
+			for(i = 0; i< lengthSend; i++)
+			{	
+				aTempBuff_Cmd[length++] = *(BuffSend + i);
+			}
+			aTempBuff_Cmd[length++] = ETX;
+			//them BBC vao
+			Temp_BBC = BBC_Cacul(&aTempBuff_Cmd[1], (length-1));    //lenh nay BBC bang Xor tu 'P' cho den ETX
+			aTempBuff_Cmd[length++] = Temp_BBC;
+			break; 
+		case CMD_WRITE: 
+			aTempBuff_Cmd[length++] = SOH;
+			aTempBuff_Cmd[length++] = 'W';
+			aTempBuff_Cmd[length++] = '1';
+			aTempBuff_Cmd[length++] = STX;
+			for(i = 0; i< lengthSend; i++)
+			{	
+				aTempBuff_Cmd[length++] = *(BuffSend + i);
+			}
+			aTempBuff_Cmd[length++] = ETX;
+			//them BBC vao
+			Temp_BBC = BBC_Cacul(&aTempBuff_Cmd[1], (length-1));    //lenh nay BBC bang Xor tu 'P' cho den ETX
+			aTempBuff_Cmd[length++] = Temp_BBC;
+			break; 
+			
+		case CMD_LOGOUT:   
+			// SOH B0 STX () ETX BCC
+			aTempBuff_Cmd[length++] = SOH;
+			aTempBuff_Cmd[length++] = 'B';
+			aTempBuff_Cmd[length++] = '0';
+			aTempBuff_Cmd[length++] = STX;
+			aTempBuff_Cmd[length++] = '(';
+			aTempBuff_Cmd[length++] = ')';
+			aTempBuff_Cmd[length++] = ETX;
+			//them BBC vao
+			Temp_BBC = BBC_Cacul(&aTempBuff_Cmd[1], (length-1));    //lenh nay BBC bang Xor tu 'P' cho den ETX
+			aTempBuff_Cmd[length++] = Temp_BBC;
+			
+		default: 
+			break;
+	}
+	HAL_UART_Transmit(&huart1,&aTempBuff_Cmd[0], length, 300);
+}
+
+
+ 
+void Connect_Metter_Handle(void)
+{
+	uint8_t ReadIDRetry = 2; // qua 1 lan la bi loi khi sang mat khau moi - chi doc 1 lan
+	
+	osDelay(TIME_DELAY_ERR);
+	__HAL_UART_ENABLE_IT(&huart1, UART_IT_RXNE);
+	
+	while (ReadIDRetry>0)
+	{
+        Met_Var.Read_Meter_ID_Success = Get_Meter_ID();
+        if (Met_Var.Read_Meter_ID_Success == 1)
+            break;
+        else
+            osDelay(TIME_DELAY_ERR);
+        ReadIDRetry--;
+	}
+	if (Met_Var.Read_Meter_ID_Success == 0)   //Reinit uart1  /**** Check lai o day xem con loi khong ***/
+	{
+		huart1.Instance = USART1;
+		huart1.Init.BaudRate = UART2_BAUR_2;
+		huart1.Init.WordLength = UART2_DATALENGTH;
+		huart1.Init.StopBits = UART_STOPBITS_1;
+		huart1.Init.Parity = UART_PARITY_EVEN;
+		huart1.Init.Mode = UART_MODE_TX_RX;
+		huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+		huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+		huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE ;
+		huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+		HAL_UART_Init(&huart1);
+		//
+		__HAL_UART_ENABLE_IT(&huart1, UART_IT_RXNE);
+		osDelay(TIME_DELAY_ERR);
+		
+		ReadIDRetry = 2;
+		
+		while (ReadIDRetry>0)
+		{
+            Met_Var.Read_Meter_ID_Success = Get_Meter_ID();
+            if (Met_Var.Read_Meter_ID_Success == 1)
+                break;
+            else
+                osDelay(TIME_DELAY_ERR);
+            ReadIDRetry--;
+		}
+	}
+	if(Met_Var.Read_Meter_ID_Success == 0)
+	{
+        osDelay(120000);
+		 __disable_irq();
+		 NVIC_SystemReset();
+	}
+}
+
+
+uint8_t Get_Meter_ID (void)
+{
+	uint8_t GetMeterIDRetry = 3;
+	uint8_t Data_Set_ID[11] = {'0', '(', '0', '0', '0', '0', '0', '0', '0', '0', ')'}; // 11byte: 0(00000000)
+    uint8_t i = 0;
+    uint16_t length = 0;
+    uint8_t ByteTemp = 0;
+    
+    
+	while (GetMeterIDRetry--)
+	{
+		if (CPC_Handshake_Handle() == 1)
+		{
+			HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nRead ID meter\r\n", 17, 1000);
+			UART1_Control.Mode_ui8 = 0;    //chuyen uart sang nhan data
+			Reset_UART1_State();
+			//Send Read ID
+			CPC_IEC62056_21_Command (CMD_READ, &Data_Set_ID[0], 11);
+            
+			if (osSemaphoreWait(bsUART2PendingMessHandle,5000) == osOK) 
+            {
+				//Check BBC
+				if(CPC_Check_Sum(&UART1_Control.UART1_Str_Recei) == 1)
+				{
+                    Met_Var.MeterID = 0;
+					//cat ID meter o day
+                    if(*(UART1_Control.UART1_Str_Recei.Data_a8 + 1) == Data_Set_ID[0])  //
+                    {
+                        for(i = 0; i < 4; i++)
+                        {
+                            ByteTemp = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+                            length += 2;
+                            Met_Var.MeterID |= (ByteTemp << (8*i));
+                        }     
+                        //Convert sang Struct string va luu vao FLash
+                        Reset_Buff(&sDCU.sMeter_id_now);
+                        Pack_HEXData_Frame(&sDCU.sMeter_id_now,  Met_Var.MeterID, 0); 
+                        Save_Meter_ID();
+                        
+                        HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nRead ID OK\r\n", 14, 1000);
+                        return 1;
+                    }
+				}
+				else
+				{
+					HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nRead ID Fail\r\n", 16, 1000);
+					Reset_UART1_State();
+					CPC_IEC62056_21_Command (CMD_LOGOUT, NULL, 0);
+					osDelay(TIME_DELAY_ERR);
+				}
+			}
+			else
+			{
+				Reset_UART1_State();
+				CPC_IEC62056_21_Command (CMD_LOGOUT, NULL, 0);
+				osDelay(TIME_DELAY_ERR);
+				HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nRead ID Fail\r\n", 16, 1000);
+			}
+		}
+		HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nRetry Connect Meter\r\n", 23, 1000);
+	}
+	return 0;
+}
+
+
+
+void Reset_UART1_State (void)
+{
+	Init_Point_Buffer(&UART1_Control.UART1_Str_Recei, UART1_Receive_Buff);
+	UART1_Control.Mess_Pending_ui8 = 0;
+	UART1_Control.Flag_Have_0x02  = 0;
+}
+
+void Init_Point_Buffer (truct_String* Str_Point, uint8_t* Buff)
+{
+	Str_Point->Data_a8 = Buff;
+	Reset_Buff(Str_Point);
+	Str_Point->Length_u16 = 0;
+}
+int	PosFind = 0;
+uint8_t CPC_Handshake_Handle (void)
+{
+	Reset_UART1_State();
+	Met_Var.Step_HandShake = STEP_END;   	   
+	uint8_t i = 0;
+      
+	uint8_t Count_Step_End = 0;
+	UART1_Control.Mode_ui8 = 1;
+	Met_Var.Reading_ui8 = 0;
+	
+	while (Met_Var.Reading_ui8 == 0)     
+	{
+		switch (Met_Var.Step_HandShake)
+		{
+			case SEND_FIRST_CHAR:	//Send first Char  
+				HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nSend First Char\r\n", 19, 1000);
+				Met_Var.Step_HandShake++;
+				//Send First Char cmd
+				CPC_IEC62056_21_Command (CMD_HANDSHAKE, NULL, 0);
+				break;
+			case CHECK_ACK_1:   //check ACK 1 tu cong to ra
+				if (osSemaphoreWait(bsUART2PendingMessHandle,5000) == osOK) 
+                {
+                    Met_Var.Step_HandShake++;
+					//Check chuoi nhan ve
+					if(UART1_Control.UART1_Str_Recei.Length_u16 < 5) return 0;
+					
+					if(Find_String_V2(&Str_ACK, &UART1_Control.UART1_Str_Recei) >= 0)
+					{
+						Reset_UART1_State();
+					}else Met_Var.Step_HandShake = STEP_END;
+
+				} else Met_Var.Step_HandShake = STEP_END;	
+				break;
+			case SEND_BAURATE:	
+				HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nSend Baurate to Meter\r\n", 25, 1000);
+				Met_Var.Step_HandShake++;
+				//send ACK + Baurate
+				CPC_IEC62056_21_Command (CMD_ACK, NULL, 0);
+				break;
+			case RECEI_ENCRYPT_KEY:   //Mat khau câp 3 can phai lay Key de mã hoa Pass:16 byte DC 34 61 91 0E 9E 70 B6 E7 8F AB 3A D3 30 3A C2
+				if (osSemaphoreWait(bsUART2PendingMessHandle,5000) == osOK) 
+                {
+                    Met_Var.Step_HandShake++;
+					PosFind = Find_String_V2(&Str_RECEI_KEY, &UART1_Control.UART1_Str_Recei);
+					if( PosFind >= 0)
+					{
+						//lay key
+						for(i = 0; i < 16; i++)
+						{
+							CPC_KEY_ENCRYPT[i] = *(UART1_Control.UART1_Str_Recei.Data_a8 + PosFind + Str_RECEI_KEY.Length_u16 + 1 + i);
+							//ma hoa Pass nêu la Pass cap 3
+						}
+						Reset_UART1_State();
+					}else 
+						Met_Var.Step_HandShake = STEP_END;
+					
+				} else Met_Var.Step_HandShake = STEP_END;  
+				break;
+			case SEND_PASSWORD:	//Send first Char
+				HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nSend Password\r\n", 17, 1000);
+				Met_Var.Step_HandShake++;
+				//Send truc tiep mat khau cap 2
+				CPC_IEC62056_21_Command (CMD_SEND_PASS, &password_2[0], sizeof(password_2));
+				break;
+			case CHECK_ACK_2:
+				if (osSemaphoreWait(bsUART2PendingMessHandle,5000) == osOK) 
+                {
+					Reset_UART1_State();
+					Met_Var.Reading_ui8 = 1;
+					HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nHandshake Success\r\n", 21, 1000);
+				}else Met_Var.Step_HandShake = STEP_END;
+				break;
+			case STEP_END:
+				HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nLogOut Meter\r\n", 16, 1000);
+				CPC_IEC62056_21_Command (CMD_LOGOUT, NULL, 0);
+				Count_Step_End++;
+				if(Count_Step_End <= 1)
+					Met_Var.Step_HandShake = SEND_FIRST_CHAR;
+				else
+					return 0;
+				break;				
+			default:
+                    return 0;
+				break;		
+		}
+        
+	}
+	return 1;
+}
+
+//Nhan uart trong ngat. Co Phai thay cac ham delay bang cac hang doi queue. de check moi chuan?
+
+void GetUART1Data(void)
+{
+	uint8_t	temp_recieve = 0;
+
+	switch (UART1_Control.Mode_ui8)
+	{
+		case 0: // data message
+			if (UART1_Control.Mess_Pending_ui8 != 1)
+			{
+				temp_recieve = (uint8_t)(huart1.Instance->RDR&0xFF);
+				
+				if((temp_recieve == 0x02) || (UART1_Control.Flag_Have_0x02))    //bat dau ghi vai buff tu 0x02
+				{
+					UART1_Control.Flag_Have_0x02 = 1;  //DA NHAN DUOC KI TU BAT DAU LENH
+					
+					*(UART1_Control.UART1_Str_Recei.Data_a8 + UART1_Control.UART1_Str_Recei.Length_u16) = temp_recieve;
+					UART1_Control.UART1_Str_Recei.Length_u16++;
+					
+					if (UART1_Control.Mess_Pending_ui8 == 2)  //nhan BCC
+					{
+						UART1_Control.Mess_Pending_ui8 = 1;
+						osSemaphoreRelease(bsUART2PendingMessHandle);
+					}	
+					//
+					if (temp_recieve == ETX) // Ki tu ket thuc
+					{
+						UART1_Control.Mess_Pending_ui8 = 2;
+					}
+		
+					if (UART1_Control.UART1_Str_Recei.Length_u16 > MAX_LENGTH_BUFF_NHAN)	
+							UART1_Control.UART1_Str_Recei.Length_u16 = 0;
+				}
+			}else
+				temp_recieve = (uint8_t)(huart1.Instance->RDR&0xFF);
+			
+			break;
+		case 1: // handshake message
+			if (UART1_Control.Mess_Pending_ui8 != 1)
+			{
+				temp_recieve = (uint8_t)(huart1.Instance->RDR&0xFF);
+				
+				*(UART1_Control.UART1_Str_Recei.Data_a8 + UART1_Control.UART1_Str_Recei.Length_u16) = temp_recieve;
+			    UART1_Control.UART1_Str_Recei.Length_u16++;
+				
+				switch (Met_Var.Step_HandShake)    
+				{ 
+					case CHECK_ACK_1:
+						if (temp_recieve == 0x0A) // handshake 1
+						{
+							UART1_Control.Mess_Pending_ui8 = 1;
+							osSemaphoreRelease(bsUART2PendingMessHandle);
+						}
+						break;
+					case RECEI_ENCRYPT_KEY:
+						if (UART1_Control.Mess_Pending_ui8 == 2)  //nhan BCC
+						{
+							UART1_Control.Mess_Pending_ui8 = 1;
+							osSemaphoreRelease(bsUART2PendingMessHandle);
+						}	
+						if (temp_recieve == ETX) // Ki tu ket thuc
+						{
+							UART1_Control.Mess_Pending_ui8 = 2;
+						}
+						break;
+					case CHECK_ACK_2:
+						if (temp_recieve == ACK) //  - ACK
+						{
+							UART1_Control.Mess_Pending_ui8 = 1;
+							osSemaphoreRelease(bsUART2PendingMessHandle);
+						}	
+
+						break;
+					default:
+						break;
+				}
+			}
+			else
+				temp_recieve = (uint8_t)(huart1.Instance->RDR&0x7F);
+			break;
+		default:
+			break;
+	}
+}
+
+
+
+void CheckResetReadMeter(uint32_t Timeout)
+{
+	// Reset neu doc sai cong to
+//    if ((sDCU.Status_Meter_u8 == 0) &&
+//            (Check_Time_Out(sDCU.LandMark_Count_Reset_Find_Meter,600000) == TRUE)) // 10p
+//    {
+//        osDelay(Timeout); // 5p
+//        Read_Meter_ID_Success = Get_Meter_ID();
+//        if(Read_Meter_ID_Success != 1) // Reset MCU
+//        {
+//            __disable_irq();
+//            NVIC_SystemReset(); // Reset MCU	
+//        }
+//        else
+//            sDCU.LandMark_Count_Reset_Find_Meter = RT_Count_Systick_u32;
+//    }
+}
+
+
+
+uint8_t Read_TSVH_CPC(uint8_t (*FuncDataHandle)(void), uint8_t Mess_Type)
+{
+    uint32_t temp = 0;
+    uint16_t i = 0;
+    
+    if (CPC_Handshake_Handle() == 1)
+    {
+        if(Function_Get_Stime()== 1)
+        {
+            Function_Get_OutStation();
+            if(Function_Get_TuTi() == 1)
+            {
+                if(Function_Get_IntanVaue() == 1)
+                {
+                    Function_Get_EnergyTotal();
+                    Function_Get_Tariff();
+                    if(Function_Get_MAXDemand() == 1)
+                    {
+                      if(FuncDataHandle() == 1)
+                      {
+                            //Push data to queue
+                            //Them length trong phan luu flash
+                            for(i = 0; i < Met_Var.Str_Payload_TSVH.Length_u16; i++)
+                                *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16 + 1 - i) = *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16 - i - 1);
+                            
+                            Met_Var.Str_Payload_TSVH.Length_u16 += 2;
+                            *(Met_Var.Str_Payload_TSVH.Data_a8)     = (uint8_t) ((Met_Var.Str_Payload_TSVH.Length_u16 + 1) >> 8) ;
+                            *(Met_Var.Str_Payload_TSVH.Data_a8 + 1) = (uint8_t) (Met_Var.Str_Payload_TSVH.Length_u16 + 1) ;
+                            
+                            //Generate checksum byte
+                            for (i=0;i<Met_Var.Str_Payload_TSVH.Length_u16;i++)
+                                temp += MeterInfoDataBuff[i];
+                            
+                            temp = temp & 0x000000FF;
+                            
+                             *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16) = (uint8_t)temp;
+    
+                            Queue_Meter_Info.Mess_Direct_ui8 = 1;
+                            Queue_Meter_Info.str_Flash.Length_u16 = Met_Var.Str_Payload_TSVH.Length_u16 + 1;
+                            Queue_Meter_Info.Mess_Status_ui8 = 0;
+                            Queue_Meter_Info.Mess_Type_ui8 = Mess_Type;
+                            Queue_Meter_Info.str_Flash.Data_a8 = &MeterInfoDataBuff[0];
+                            
+                            if(Mess_Type == DATA_OPERATION)
+                                xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_Info,100);
+                            else if(Mess_Type == DATA_INTANTANIOUS)
+                            {
+                                Queue_Meter_Info.str_Flash.Length_u16 = Met_Var.Str_Payload_TSVH.Length_u16 - 2;
+                                Queue_Meter_Info.str_Flash.Data_a8 = &MeterInfoDataBuff[2];
+                                
+                                xQueueSend(qMeter_SIM900Handle,(void *)&ptrQueue_Meter_Info,100);
+                            }
+                            //Neu co ban tin bi cat thi lai day them vao hang doi
+                            if(Met_Var.Str_Payload_TSVH_2.Length_u16 > 0)
+                            {
+                                //Them length trong phan luu flash
+                                for(i = 0; i < Met_Var.Str_Payload_TSVH_2.Length_u16; i++)
+                                    *(Met_Var.Str_Payload_TSVH_2.Data_a8 + Met_Var.Str_Payload_TSVH_2.Length_u16 + 1 - i) = *(Met_Var.Str_Payload_TSVH_2.Data_a8 + Met_Var.Str_Payload_TSVH_2.Length_u16 - i - 1);
+                                
+                                Met_Var.Str_Payload_TSVH_2.Length_u16 += 2;
+                                *(Met_Var.Str_Payload_TSVH_2.Data_a8)     = (uint8_t) ((Met_Var.Str_Payload_TSVH_2.Length_u16 + 1) >> 8) ;
+                                *(Met_Var.Str_Payload_TSVH_2.Data_a8 + 1) = (uint8_t) (Met_Var.Str_Payload_TSVH_2.Length_u16 + 1);
+                                
+                                //Generate checksum byte
+                                for (i=0;i<Met_Var.Str_Payload_TSVH_2.Length_u16;i++)
+                                    temp += MeterInfoDataBuff_2[i];
+                                
+                                temp = temp & 0x000000FF;
+                                
+                                *(Met_Var.Str_Payload_TSVH_2.Data_a8 + Met_Var.Str_Payload_TSVH_2.Length_u16) = (uint8_t)temp;
+                             
+                                Queue_Meter_Info.Mess_Direct_ui8 = 1;
+                                Queue_Meter_Info.str_Flash.Length_u16 = Met_Var.Str_Payload_TSVH_2.Length_u16 + 1;
+                                Queue_Meter_Info.Mess_Status_ui8 = 0;
+                                Queue_Meter_Info.Mess_Type_ui8 = Mess_Type;
+                                Queue_Meter_Info.str_Flash.Data_a8 = &MeterInfoDataBuff_2[0];
+                                
+                                if(Mess_Type == DATA_OPERATION)
+                                    xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_Info,100);
+                                else if(Mess_Type == DATA_INTANTANIOUS)
+                                {
+                                    Queue_Meter_Info.str_Flash.Length_u16 = Met_Var.Str_Payload_TSVH_2.Length_u16 - 2;
+                                    Queue_Meter_Info.str_Flash.Data_a8 = &MeterInfoDataBuff_2[2];
+                                    
+                                    xQueueSend(qMeter_SIM900Handle,(void *)&ptrQueue_Meter_Info,100);
+                                }
+                            }
+                      }
+                      return 1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+void Read_Historycal_CPC (uint16_t IndexStart, uint16_t IndexEnd )
+{
+    uint16_t Index = 0;
+    
+    if((IndexStart < IndexEnd) || (IndexEnd == 0))  return;
+    
+    for(Index = IndexStart; Index>= IndexEnd; Index--)
+    {   
+        Read_His_CPC_InDex(&Pack_PushData_103_Chot, Index);
+
+        if (osMutexRelease(mtFlashMeterHandle) != osOK)
+            osMutexRelease(mtFlashMeterHandle);
+
+        //Delay cho send thanh cong tung goi tin roi moi doc tiep
+        while (Queue_Meter_LProf.Mess_Status_ui8 == 0)    //Gui qua task flash de luu. se set status = 1
+        {
+            if(Check_Time_Out(Met_Var.LandMark_Check_TimeOut, 60000) == 1)
+                return;
+            
+            osDelay(50);
+        }
+        if (osMutexWait(mtFlashMeterHandle,5000) != osOK)
+            return;
+        if(sInformation.Flag_Stop_ReadBill == 1)
+        {
+            sInformation.Flag_Stop_ReadBill = 0;
+            return;
+        }
+    }
+}
+uint8_t Read_His_CPC_InDex (uint8_t (*FuncDataHandle)(void), uint16_t Numbill)
+{
+    uint32_t temp = 0;
+    uint16_t i = 0;
+    
+    if (CPC_Handshake_Handle() == 1)
+    {
+        if(Function_Get_TuTi() == 1)
+        {
+            if(Function_Get_Bill(Numbill)== 1)
+            {
+                if(FuncDataHandle() == 1)
+                {
+                    //Push data to queue
+                   //Them length trong phan luu flash
+                    for(i = 0; i < Met_Var.Str_Payload_Bill.Length_u16; i++)
+                        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16 + 1 - i) = *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16 - i - 1);
+                    
+                    Met_Var.Str_Payload_Bill.Length_u16 += 2;
+                    *(Met_Var.Str_Payload_Bill.Data_a8)     = (uint8_t) ((Met_Var.Str_Payload_Bill.Length_u16 + 1) >> 8) ;
+                    *(Met_Var.Str_Payload_Bill.Data_a8 + 1) = (uint8_t) (Met_Var.Str_Payload_Bill.Length_u16 + 1);
+                    
+                    
+                    //Generate checksum byte
+                    for (i=0;i<Met_Var.Str_Payload_Bill.Length_u16;i++)
+                        temp += MeterBillingDataBuff[i];
+                    
+                    temp = temp & 0x000000FF;
+                    
+                    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16) = (uint8_t)temp;
+                                
+                    Queue_Meter_Billing.Mess_Direct_ui8 = 1;
+                    Queue_Meter_Billing.str_Flash.Length_u16 = 	Met_Var.Str_Payload_Bill.Length_u16 + 1;
+                    Queue_Meter_Billing.Mess_Status_ui8 = 0;
+                    Queue_Meter_Billing.Mess_Type_ui8 = DATA_HISTORICAL;
+                    Queue_Meter_Billing.str_Flash.Data_a8 = &MeterBillingDataBuff[0];
+                    
+                    xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_Billing,100);
+                }
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+uint8_t Function_Get_IntanVaue (void)
+{
+	uint8_t i = 0, j = 0;;
+	uint8_t Buff_Data_Set[11];	
+	
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Instan Value ...\r\n", 24, 1000);
+	
+	for(i = 0; i< MAX_PACKET_INSTANCE; i++)
+	{
+		//copy data set vao
+		for(j = 0; j<11; j++)
+			Buff_Data_Set[j] = Data_Set_Intan_1[j];
+		
+		Buff_Data_Set[3] = i + 0x30;    //khac nhau byte thu 4
+		
+		if(FunctionRead_Meter(&FunExtract_IntanValue,&Buff_Data_Set[0], 11) == 0) return 0;
+        osDelay(20);
+	}
+	
+	return 1;
+}
+
+
+uint8_t FunctionRead_Meter (void (*FuncExtractRawData)(uint8_t IndexPack), uint8_t* Buff_DataSet, uint8_t length_DataSet)
+{
+	uint8_t ByteTemp = 0;
+	
+	//truyên lenh doc gia tri intan: dong dien va dien ap
+	UART1_Control.Mode_ui8 = 0;    //chuyen uart sang nhan data
+	Reset_UART1_State();
+	
+	//Send Read ID
+	CPC_IEC62056_21_Command (CMD_READ, Buff_DataSet, length_DataSet);
+    
+    HAL_UART_Transmit(&UART_DEBUG, &Buff_DataSet[0], length_DataSet, 1000);
+	
+	//cat gia tri ra
+	if (osSemaphoreWait(bsUART2PendingMessHandle,5000) == osOK) 
+    {
+		//Check BBC
+		if(CPC_Check_Sum(&UART1_Control.UART1_Str_Recei) == 1)
+		{
+			//check byte thu 2. xem dung nhu byte dau tien cua data set khong?
+			if(*(UART1_Control.UART1_Str_Recei.Data_a8 + 1) == *(Buff_DataSet))  //
+			{
+				//cat data o day
+				if((*Buff_DataSet) == 'U')    //doc event
+				{
+					ByteTemp = Convert2ByteHexStringto_1Hex(Buff_DataSet + 4);
+					FuncExtractRawData(ByteTemp);
+				}else if(((*Buff_DataSet) == 'T') || ((*Buff_DataSet) == '^'))  //doc chot du lieu
+				{
+					ByteTemp = Convert2ByteHexStringto_1Hex(Buff_DataSet + 6);
+					FuncExtractRawData(ByteTemp);
+				}
+				else
+					FuncExtractRawData(*(Buff_DataSet + 3) - 0x30);
+			}
+			//
+			return 1;
+		}
+		else
+		{
+			Reset_UART1_State();
+			CPC_IEC62056_21_Command (CMD_LOGOUT, NULL, 0);
+			osDelay(TIME_DELAY_ERR);
+		}
+	}
+	else
+	{
+		Reset_UART1_State();
+		CPC_IEC62056_21_Command (CMD_LOGOUT, NULL, 0);
+		osDelay(TIME_DELAY_ERR);
+	}
+	return 0;
+}
+
+
+
+void FunExtract_IntanValue (uint8_t IndexPack)
+{
+	uint16_t length = 0;
+	uint8_t i = 0;
+	uint8_t j = 0;
+	uint8_t ByteTemp = 0;
+	//check length nhan:
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+	switch(IndexPack)
+	{
+		case 0:
+//            //xoa het các giá tri cu
+//            for(i = 0; i < 17; i++)
+//                Buff_IntanValue[i] = 0;
+            
+			for(j = 0; j < 6; j++)
+			{
+				//dien ap pha A, B, C dong dien pha A , B ,C
+				for(i = 0; i < 4; i++)
+				{
+					ByteTemp = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+					length += 2;
+					Buff_IntanValue[j] |= (ByteTemp << (8*i));
+				}
+			}
+			
+			for(j = 6; j < 9; j++)
+			{
+				//tan so pha A B C
+				for(i = 0; i < 2; i++)
+				{
+					ByteTemp = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+					length += 2;
+					Buff_IntanValue[j] |= (ByteTemp << (8*i));
+				}
+			}
+			
+			for(j = 9; j < 13; j++)
+			{
+				//Goc lech A B C trung binh
+				for(i = 0; i < 4; i++)
+				{
+					ByteTemp = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+					length += 2;
+					Buff_IntanValue[j] |= (ByteTemp << (8*i));
+				}
+			}
+			
+			for(j = 13; j < 17; j++)
+			{
+				//he so cong suat A B C trung binh
+				for(i = 0; i < 2; i++)
+				{
+					ByteTemp = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+					length += 2;
+					Buff_IntanValue[j] |= (ByteTemp << (8*i));
+				}
+			}
+
+			break;
+		case 1:
+			for(j = 0; j < 8; j++)
+            {
+                for(i = 0; i < 8; i++)
+                {
+                    ByteTemp = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+                    length += 2;
+                    Buff_IntanPower[j] |= (ByteTemp << (8*i));
+                }
+            }
+
+			break;
+		case 2:
+            for(j = 0; j < 4; j++)
+            {
+                for(i = 0; i < 8; i++)
+                {
+                    ByteTemp = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+                    length += 2;
+                    Buff_IntanQ[j] |= (ByteTemp << (8*i));
+                }
+            }
+            Met_Var.Flag_GetIntan_Ok = 1;
+			break;
+		default:
+			break;
+	}
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Instan Value OK\r\n", 23, 1000);
+}
+
+
+//Doc giá tri sTime
+uint8_t Function_Get_Stime (void)
+{
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet STime ...\r\n", 17, 1000);
+	return FunctionRead_Meter(&FunExtract_STime,&Data_Set_ReadsTime[0], 11);
+}
+
+
+void FunExtract_STime(uint8_t IndexPack)
+{
+	//check length nhan:
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+	//
+	Met_Var.STimeIntan.sec 		= Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + 3);
+	Met_Var.STimeIntan.min 		= Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + 5);
+	Met_Var.STimeIntan.hour 	= Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + 7);
+	Met_Var.STimeIntan.date 	= Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + 9);
+	Met_Var.STimeIntan.month 	= Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + 11);
+	Met_Var.STimeIntan.year 	= Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + 13);
+	
+    Met_Var.sTime_s = HW_RTC_GetCalendarValue_Second(Met_Var.STimeIntan);
+      
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet STime OK\r\n", 16, 1000);
+	PrintChar1byte(Met_Var.STimeIntan.sec);
+	PrintChar1byte(Met_Var.STimeIntan.min);
+	PrintChar1byte(Met_Var.STimeIntan.hour);
+	PrintChar1byte(Met_Var.STimeIntan.date);
+	PrintChar1byte(Met_Var.STimeIntan.month);
+	PrintChar1byte(Met_Var.STimeIntan.year);
+}
+
+uint8_t ConvertHexStringtoHex (uint8_t HexString)
+{
+	if(HexString > 0x39) return(HexString - 0x37);
+	else return(HexString - 0x30);
+}
+
+uint8_t Convert2ByteHexStringto_1Hex (uint8_t* Buff)
+{
+	uint8_t ByteTemp = 0;
+	
+	ByteTemp = (ConvertHexStringtoHex (*Buff)) << 4;
+	ByteTemp |= ConvertHexStringtoHex (*(Buff + 1));
+	
+	return ByteTemp;
+}
+
+//Doc giá tri Out station
+uint8_t Function_Get_OutStation (void)
+{
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Out Station ...\r\n", 23, 1000);
+	return FunctionRead_Meter(&FunExtract_OStation,&Data_Set_ReadOStation[0], 11);
+}
+
+
+void FunExtract_OStation(uint8_t IndexPack)
+{
+	uint16_t length = 0;
+	//check length nhan:
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+	//Init buff Chua string out station meter
+	Met_Var.String_OutStation.Data_a8 = &BuffStringOutStation[0];
+	Reset_Buff(&Met_Var.String_OutStation);
+	Met_Var.String_OutStation.Length_u16 = 0;
+	
+	while ((length + 3) < UART1_Control.UART1_Str_Recei.Length_u16 -3)
+	{
+		*(Met_Var.String_OutStation.Data_a8 + Met_Var.String_OutStation.Length_u16) = *(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+		Met_Var.String_OutStation.Length_u16++;
+		length++;
+	}
+	
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Out Station OK\r\n", 22, 1000);
+	HAL_UART_Transmit(&UART_DEBUG, Met_Var.String_OutStation.Data_a8, Met_Var.String_OutStation.Length_u16, 1000);
+}
+
+//Doc giá tri Tu Ti
+uint8_t Function_Get_TuTi (void)
+{
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Tu Ti ...\r\n", 17, 1000);
+	return FunctionRead_Meter(&FunExtract_TuTi,&Data_Set_ReadOTuTi[0], 11);
+}
+
+
+void FunExtract_TuTi(uint8_t IndexPack)
+{
+	uint16_t length = 0;
+	uint8_t i = 0;
+	uint8_t ByteTemp = 0;
+	
+	Met_Var.Tu_Primary = 0;
+	Met_Var.Ti_Primary = 0;
+	Met_Var.Ti_Second = 0;
+	Met_Var.Tu_Second = 0;
+	
+	//check length nhan:
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+	//Tu Primary  ConvertHexStringtoHex
+	for(i = 0; i < 4; i++)
+	{
+		ByteTemp = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+		length += 2;
+		Met_Var.Tu_Primary |= (ByteTemp << (8*i));
+	}
+	
+	//Tu Second
+	Met_Var.Tu_Second = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+	length += 2;
+	
+	//Ti Primary
+	for(i = 0; i < 4; i++)
+	{
+		ByteTemp = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+		length += 2;
+		Met_Var.Ti_Primary |= (ByteTemp << (8*i));
+	}
+	//Ti Second
+	Met_Var.Ti_Second = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+	
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Tu Ti OK\r\n", 16, 1000);
+	//
+	PrintInteger4byte(Met_Var.Tu_Primary);
+	PrintChar1byte(Met_Var.Tu_Second);
+	PrintInteger4byte(Met_Var.Ti_Primary);
+	PrintChar1byte(Met_Var.Ti_Second);
+}
+
+//Doc giá tri Dien nang tong
+uint8_t Function_Get_EnergyTotal (void)
+{
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Energy total ...\r\n", 24, 1000);
+	return FunctionRead_Meter(&FunExtract_EnergyTotal,&Data_Set_ReadEnergy_Intan[0], 11);
+}
+
+
+void FunExtract_EnergyTotal(uint8_t IndexPack)
+{
+	uint16_t length = 0;
+	uint8_t i = 0;
+		
+	Met_Var.EnergTo.ImportActive = 0;
+	Met_Var.EnergTo.EXportActive = 0;
+	Met_Var.EnergTo.ImportReactive = 0;
+	Met_Var.EnergTo.EXportReative = 0;
+	Met_Var.EnergTo.Q1 = 0;
+	Met_Var.EnergTo.Q2 = 0;
+	Met_Var.EnergTo.Q3 = 0;
+	Met_Var.EnergTo.Q4 = 0;
+	Met_Var.EnergTo.Apprent = 0;
+
+	//lây lan luot cac gia tri: moi gia tri 8byte
+	for(i = 0; i < 8; i++)
+	{
+		Met_Var.EnergTo.ImportActive |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+	for(i = 0; i < 8; i++)
+	{
+		Met_Var.EnergTo.EXportActive |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+
+	for(i = 0; i < 8; i++)
+	{
+		Met_Var.EnergTo.ImportReactive |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+
+	for(i = 0; i < 8; i++)
+	{
+		Met_Var.EnergTo.EXportReative |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+
+	for(i = 0; i < 8; i++)
+	{
+		Met_Var.EnergTo.Q1 |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+
+	for(i = 0; i < 8; i++)
+	{
+		Met_Var.EnergTo.Q2 |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+
+	for(i = 0; i < 8; i++)
+	{
+		Met_Var.EnergTo.Q3 |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+	for(i = 0; i < 8; i++)
+	{
+		Met_Var.EnergTo.Q4 |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+
+	for(i = 0; i < 8; i++)
+	{
+		Met_Var.EnergTo.Apprent |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+	Met_Var.Flag_Get_EnRegister_Ok = 1;
+    
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Energy Intan OK\r\n", 23, 1000);
+	//
+	Print8byte(Met_Var.EnergTo.ImportActive);
+	Print8byte(Met_Var.EnergTo.EXportActive);
+	Print8byte(Met_Var.EnergTo.EXportReative);
+	Print8byte(Met_Var.EnergTo.Q1);
+	Print8byte(Met_Var.EnergTo.Q2);
+	Print8byte(Met_Var.EnergTo.Q3);
+	Print8byte(Met_Var.EnergTo.Q4);
+	Print8byte(Met_Var.EnergTo.Apprent);
+}
+
+
+//doc bieu gia 
+uint8_t Function_Get_Tariff (void)
+{
+	uint8_t i = 0, j = 0;;
+	uint8_t Buff_Data_Set[11];	
+	
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Tariff ...\r\n", 18, 1000);
+	
+	for(i = 0; i< MAX_PACKET_TARIFF; i++)
+	{
+		//copy data set vao
+		for(j = 0; j<11; j++)
+			Buff_Data_Set[j] = Data_Set_ReadTariff_G1[j];
+		Buff_Data_Set[3] = i + 0x30;    //khac nhau byte thu 4
+		
+		if(FunctionRead_Meter(&FunExtract_Tariff,&Buff_Data_Set[0], 11) == 0) return 0;
+        osDelay(20);
+	}
+	return 1;
+}
+
+
+void FunExtract_Tariff (uint8_t IndexPack)
+{
+	switch(IndexPack)
+	{
+		case 0: 
+			FunExtract_In1Pack_Tariff(IndexPack);
+			break;
+		case 1:
+			FunExtract_In1Pack_Tariff(IndexPack);
+			break;
+		case 2:
+			FunExtract_In1Pack_Tariff(IndexPack);
+			break;
+		case 3:
+			FunExtract_In1Pack_Tariff(IndexPack);
+            Met_Var.Flag_Get_Tariff_Ok = 1;
+			break;
+		default:
+			break;
+	}
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Tariff OK\r\n", 17, 1000);
+}
+
+
+void FunExtract_In1Pack_Tariff(uint8_t Pack)
+{
+	uint16_t length = 0;
+	uint8_t i = 0;
+	uint8_t j = 0;
+
+	//check length nhan:
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+	//
+	for(i = 0; i < 8; i++)
+	{
+		//lay source
+		Met_Var.Tariff_G[Pack][i].Source = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+		length += 2;
+		
+		Met_Var.Tariff_G[Pack][i].Value = 0;
+		
+		for(j = 0; j < 8; j++)
+		{
+			Met_Var.Tariff_G[Pack][i].Value |=  ((Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*j));
+			length += 2;
+		}
+	}
+}
+
+
+//doc Maximun Demand 
+uint8_t Function_Get_MAXDemand (void)
+{
+	uint8_t i = 0, j = 0;;
+	uint8_t Buff_Data_Set[11];	
+	
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet MAX Demand ...\r\n", 22, 1000);
+	
+	for(i = 0; i< MAX_PACKET_MAXDEMAND; i++)
+	{
+		//copy data set vao
+		for(j = 0; j<11; j++)
+			Buff_Data_Set[j] = Data_Set_ReadMD_1[j];
+		Buff_Data_Set[3] = i + 0x30;    //khac nhau byte thu 4
+		
+		if(FunctionRead_Meter(&FunExtract_MAXDemand,&Buff_Data_Set[0], 11) == 0) return 0;
+        osDelay(20);
+	}
+	return 1;
+}
+
+
+void FunExtract_MAXDemand (uint8_t IndexPack)
+{
+	switch(IndexPack)
+	{
+		case 0: 
+			FunExtract_In1Pack_MaxDemand(IndexPack);
+			break;
+		case 1:
+			FunExtract_In1Pack_MaxDemand(IndexPack);
+			break;
+		case 2:
+			FunExtract_In1Pack_MaxDemand(IndexPack);
+			break;
+		case 3:
+			FunExtract_In1Pack_MaxDemand(IndexPack);
+			break;
+		case 4:
+			FunExtract_In1Pack_MaxDemand(IndexPack);
+			break;
+		case 5:
+			FunExtract_In1Pack_MaxDemand(IndexPack);
+			break;
+		case 6:
+			FunExtract_In1Pack_MaxDemand(IndexPack);
+			break;
+		case 7:
+			FunExtract_In1Pack_MaxDemand(IndexPack);
+            Met_Var.Flag_Get_MaxDemand_Ok = 1;
+			break;
+		default:
+			break;
+	}
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet MaxDemand OK\r\n", 20, 1000);
+}
+
+void FunExtract_In1Pack_MaxDemand(uint8_t Pack)
+{
+	uint16_t length = 0;
+	uint8_t i = 0;
+	uint8_t j = 0;
+
+	//check length nhan:
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+	
+	//lay source
+	Met_Var.MaxDemand_G[Pack].Source = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+	length += 2;
+		
+	for(i = 0; i < 3; i++)
+	{
+		Met_Var.MaxDemand_G[Pack].Number[i].Value = 0;
+		Met_Var.MaxDemand_G[Pack].Number[i].Time = 0;
+		for(j = 0; j < 8; j++)
+		{
+			Met_Var.MaxDemand_G[Pack].Number[i].Value |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*j);
+			length += 2;
+		}
+		for(j = 0; j < 4; j++)
+		{
+			Met_Var.MaxDemand_G[Pack].Number[i].Time |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*j);
+			length += 2;
+		}
+	}
+}
+
+
+
+//doc Event
+uint8_t Function_Get_Event(void)
+{
+	uint8_t i = 0, j = 0;;
+	uint8_t Buff_Data_Set[11];	
+	uint8_t Temp = 0;
+	
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Event ...\r\n", 17, 1000);
+	
+	for(i = 0; i< MAX_PACKET_EVENT; i++)
+	{
+		//copy data set vao
+		for(j = 0; j<11; j++)
+			Buff_Data_Set[j] = Data_Set_Event_1[j];
+		//thay 2 byte 4 5 bang Index event
+		Temp = ConvertHextoAscii((i &0xF0) >> 4);
+		Buff_Data_Set[4] = Temp;    //khac nhau byte thu 4
+		Temp = ConvertHextoAscii(i &0x0F);
+		Buff_Data_Set[5] =  Temp;    	   //khac nhau byte thu 5
+		
+		if(FunctionRead_Meter(&FunExtract_Event,&Buff_Data_Set[0], 11) == 0) return 0;
+        osDelay(20);
+	}
+	return 1;
+}
+
+uint8_t ConvertHextoAscii (uint8_t Hex)
+{
+	if(Hex > 0x09) return (Hex + 0x37);
+	else return (Hex + 0x30);
+}
+
+void FunExtract_Event (uint8_t IndexPack)
+{
+	switch(IndexPack)
+	{
+		case 0: 
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 1:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 2:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 3:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 4:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 5:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 6:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 7:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 8: 
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 9:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x0A:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x0B:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x0C:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x0D:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x0E:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x0F:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x10: 
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x11:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x12:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x13:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x14:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x15:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x16:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x17:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x18: 
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x19:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x1A:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x1B:
+			FunExtract_In1Pack_Event(IndexPack);
+			break;
+		case 0x1C:
+			FunExtract_In1Pack_Event(IndexPack);
+            Met_Var.Flag_Get_Event_Ok = 1;
+			break;
+		default:
+			break;
+	}
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Event OK\r\n", 16, 1000);
+}
+
+void FunExtract_In1Pack_Event(uint8_t Pack)
+{
+	uint16_t length = 0;
+	uint8_t i = 0;
+	uint8_t j = 0;
+
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+	//lay source
+	Met_Var.Event[Pack].Source = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+	length += 2;
+	//total 	
+    for(j = 0; j < 4; j++)
+    {
+        Met_Var.Event[Pack].Total |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*j);
+        length += 2;
+    }
+    Met_Var.Event[Pack].NumTime = 0;
+    //
+    while((length+3) < (UART1_Control.UART1_Str_Recei.Length_u16 - 3 - 2))  //tru them 2 vi stime cuoi cung 4 byte
+    {
+        for(i = 0; i < 2; i++)
+        {
+            //Starttime
+            for(j = 0; j < 4; j++)
+            {
+                 Met_Var.Event[Pack].Time[Met_Var.Event[Pack].NumTime].TimeStart |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*j);
+                length += 2;
+            }
+            //Stoptime
+            for(j = 0; j < 4; j++)
+            {
+                 Met_Var.Event[Pack].Time[Met_Var.Event[Pack].NumTime].TimeStop |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*j);
+                length += 2;
+            }
+            //Convert sang RTC luon
+            Epoch_to_date_time(& Met_Var.Event[Pack].Time[Met_Var.Event[Pack].NumTime].TimeStartRTC,  Met_Var.Event[Pack].Time[Met_Var.Event[Pack].NumTime].TimeStart);
+            Epoch_to_date_time(& Met_Var.Event[Pack].Time[Met_Var.Event[Pack].NumTime].TimeStopRTC,  Met_Var.Event[Pack].Time[Met_Var.Event[Pack].NumTime].TimeStop);
+        }   
+        Met_Var.Event[Pack].NumTime++;
+    }
+}
+
+
+
+
+//Ham de debug
+uint16_t ConvertHextoHexstring (uint8_t* BuffHex, uint16_t length, uint8_t* BuffHexString)
+{
+	uint8_t temp = 0;
+	uint16_t i = 0;
+	uint16_t LengthResult = 0;
+	
+	for(i = 0; i < length; i++)
+	{
+		temp = (*(BuffHex +i) & 0xF0) >> 4;
+		*(BuffHexString + 2*i) = ConvertHextoAscii(temp);
+		temp = *(BuffHex +i) & 0x0F;
+		*(BuffHexString + 2*i + 1) = ConvertHextoAscii(temp);
+		LengthResult += 2;
+	}
+	return LengthResult;
+}
+
+void PrintInteger4byte(uint32_t value)
+{
+	uint8_t buff[4];
+	uint8_t LengthPrint = 0;
+	uint8_t Buff_Print[8];
+	
+	buff[0] = (uint8_t)(value >> 24);
+	buff[1] = (uint8_t)(value >> 16);
+	buff[2] = (uint8_t)(value >> 8);
+	buff[3] = (uint8_t)(value);
+	
+	LengthPrint = (uint8_t) ConvertHextoHexstring(&buff[0], 4, &Buff_Print[0]);
+	
+	HAL_UART_Transmit(&UART_DEBUG, &Buff_Print[0], LengthPrint, 1000);
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "  \r\n", 4, 1000);
+}
+
+void PrintChar1byte(uint8_t value)
+{
+	uint8_t Buff_Print[2];
+	
+	ConvertHextoHexstring(&value, 1, &Buff_Print[0]);
+	
+	HAL_UART_Transmit(&UART_DEBUG, &Buff_Print[0], 2, 1000);
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "  \r\n", 4, 1000);
+}
+
+void Print8byte(uint64_t value)
+{
+	uint8_t buff[8];
+	uint8_t LengthPrint = 0;
+	uint8_t Buff_Print[16];
+	
+	buff[0] = (uint8_t)(value >> 56);
+	buff[1] = (uint8_t)(value >> 48);
+	buff[2] = (uint8_t)(value >> 40);
+	buff[3] = (uint8_t)(value >> 32);
+	buff[4] = (uint8_t)(value >> 24);
+	buff[5] = (uint8_t)(value >> 16);
+	buff[6] = (uint8_t)(value >> 8);
+	buff[7] = (uint8_t)(value);
+	
+	LengthPrint = (uint8_t) ConvertHextoHexstring(&buff[0], 8, &Buff_Print[0]);
+	
+	HAL_UART_Transmit(&UART_DEBUG, &Buff_Print[0], LengthPrint, 1000);
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "  \r\n", 4, 1000);
+}
+
+
+
+
+//Doc chot du lieu
+
+uint8_t Function_Get_Bill(uint16_t SttBill)
+{
+	uint8_t i = 0, j = 0;;
+	uint8_t Buff_Data_Set[11];	
+	uint8_t Temp = 0;
+    uint8_t TempBill = 0;
+	
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Last Bill ...\r\n", 21, 1000);
+	
+	for(i = 0; i< MAX_PACKET_LASTBILL; i++)
+	{
+		//copy data set vao
+		for(j = 0; j<11; j++)
+			Buff_Data_Set[j] = Data_Set_LastBill_1[j];
+        
+		//thay 2 byte 2 3 SttBill
+        TempBill = (uint8_t) SttBill;
+        Temp = ConvertHextoAscii((TempBill &0xF0) >> 4);
+		Buff_Data_Set[2] = Temp;    //khac nhau byte thu 2
+        Temp = ConvertHextoAscii(TempBill &0x0F);
+		Buff_Data_Set[3] = Temp;    //khac nhau byte thu 3
+        
+        TempBill = (uint8_t) (SttBill >> 8);
+        Temp = ConvertHextoAscii((TempBill &0xF0) >> 4);
+		Buff_Data_Set[4] = Temp;    //khac nhau byte thu 2
+        Temp = ConvertHextoAscii(TempBill &0x0F);
+		Buff_Data_Set[5] = Temp;    //khac nhau byte thu 3
+        
+        //thay 2 byte 6 7 bang Index Pack
+		Temp = ConvertHextoAscii((i &0xF0) >> 4);
+		Buff_Data_Set[6] = Temp;    //khac nhau byte thu 6
+		Temp = ConvertHextoAscii(i &0x0F);
+		Buff_Data_Set[7] =  Temp;   //khac nhau byte thu 7
+		
+		if(FunctionRead_Meter(&FunExtract_LastBill,&Buff_Data_Set[0], 11) == 0) return 0;
+        osDelay(20);
+	}
+	return 1;
+}
+
+
+void FunExtract_LastBill (uint8_t IndexPack)
+{
+	uint8_t i = 0;
+	uint16_t length = 0;
+	
+	switch(IndexPack)
+	{
+		case 0: 
+			//4byte time UTC. don vi giây.
+            HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+			LastBill.sTime = 0;
+			for(i = 0; i < 4; i++)
+			{
+				LastBill.sTime |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+			break;
+		case 1:
+            HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+			LastBill.E_Regis_Total.ImportActive = 0;
+			LastBill.E_Regis_Total.EXportActive = 0;
+			LastBill.E_Regis_Total.ImportReactive = 0;
+			LastBill.E_Regis_Total.EXportReative = 0;
+			LastBill.E_Regis_Total.Q1 = 0;
+			LastBill.E_Regis_Total.Q2 = 0;
+			LastBill.E_Regis_Total.Q3 = 0;
+			LastBill.E_Regis_Total.Q4 = 0;
+			LastBill.E_Regis_Total.Apprent = 0;
+			LastBill.E_Regis_Total.C1_Val = 0;
+			LastBill.E_Regis_Total.C2_Val = 0;
+			LastBill.E_Regis_Total.C3_Val = 0;
+		
+			//lây lan luot cac gia tri: moi gia tri 8byte
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.ImportActive |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.EXportActive |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+		
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.ImportReactive |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+		
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.EXportReative |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+		
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.Q1 |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+		
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.Q2 |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+		
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.Q3 |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.Q4 |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+		
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.Apprent |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+		
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.C1_Val |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.C2_Val |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+		
+			for(i = 0; i < 8; i++)
+			{
+				LastBill.E_Regis_Total.C3_Val |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+				length += 2;
+			}
+			break;
+		case 2:
+			FunExtract_In1Pack_TariffLastBill(IndexPack - 2);
+			break;
+		case 3:
+			FunExtract_In1Pack_TariffLastBill(IndexPack - 2);
+			break;
+		case 4:
+			FunExtract_In1Pack_TariffLastBill(IndexPack - 2);
+			break;
+		case 5:
+			FunExtract_In1Pack_TariffLastBill(IndexPack - 2);
+			break;
+		case 6:
+			FunExtract_In1Pack_MaxDemandLastBill(IndexPack - 6);
+			break;
+		case 7:
+			FunExtract_In1Pack_MaxDemandLastBill(IndexPack - 6);
+			break;
+		case 8: 
+			FunExtract_In1Pack_MaxDemandLastBill(IndexPack - 6);
+			break;
+		case 9:
+			FunExtract_In1Pack_MaxDemandLastBill(IndexPack - 6);
+            Met_Var.Flag_Get_Chot_Ok = 1;
+			break;
+		default:
+			break;
+	}
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet Last Bill OK\r\n", 20, 1000);
+}
+
+void FunExtract_In1Pack_TariffLastBill(uint8_t Pack)
+{
+	uint16_t length = 0;
+	uint8_t i = 0;
+	uint8_t j = 0;
+
+	//check length nhan:
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+	//
+	for(i = 0; i < 8; i++)
+	{
+		//lay source
+		LastBill.Tariff_G[Pack][i].Source = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+		length += 2;
+		
+		LastBill.Tariff_G[Pack][i].Value = 0;
+		
+		for(j = 0; j < 8; j++)
+		{
+			LastBill.Tariff_G[Pack][i].Value |=  ((Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*j));
+			length += 2;
+		}
+	}
+}
+
+
+
+
+
+void FunExtract_In1Pack_MaxDemandLastBill(uint8_t Pack)
+{
+	uint16_t length = 0;
+	uint8_t i = 0;
+	uint8_t j = 0;
+	uint8_t count = 0;
+
+	//check length nhan:
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+	
+	//lay source
+	for(count = 0; count < 2; count++)
+	{
+		LastBill.MaxDemand_G[Pack*2 + count].Source = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+		length += 2;
+			
+		for(i = 0; i < 3; i++)
+		{
+			LastBill.MaxDemand_G[Pack*2 + count].Number[i].Value = 0;
+			LastBill.MaxDemand_G[Pack*2 + count].Number[i].Time = 0;
+			for(j = 0; j < 8; j++)
+			{
+				LastBill.MaxDemand_G[Pack*2 + count].Number[i].Value |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*j);
+				length += 2;
+			}
+			for(j = 0; j < 4; j++)
+			{
+				LastBill.MaxDemand_G[Pack*2 + count].Number[i].Time |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*j);
+				length += 2;
+			}
+		}
+	}
+}
+
+
+//doc bieu do phu tai
+
+uint8_t Read_Lpf_CPC (uint16_t Index_Start, uint16_t Index_End, uint8_t mode)
+{
+    if (CPC_Handshake_Handle() == 1)
+    {
+        if(Function_Get_Stime()== 1)
+        {
+            if(Function_Get_TuTi() == 1)
+            {
+                Function_Get_LoadProfile(Index_Start, Index_End, mode);
+                sInformation.Flag_Stop_ReadLpf = 0;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+uint8_t Read_Infor_Meter (void)
+{    
+    if (CPC_Handshake_Handle() == 1)
+        if(Function_Get_Stime()== 1)
+            if(Function_Get_TuTi() == 1)
+            {
+                //Dong goi ban tin gui qua task Flash mangage
+                Pack_PushData_103_Infor_Meter();
+                //Push data to queue
+                Queue_Meter_AddInfor.Mess_Direct_ui8 = 1;
+                Queue_Meter_AddInfor.str_Flash.Length_u16 = 	Met_Var.Str_Infor_Meter.Length_u16;
+                Queue_Meter_AddInfor.Mess_Status_ui8 = 0;
+                Queue_Meter_AddInfor.Mess_Type_ui8 = DATA_METER_INFOR;
+                Queue_Meter_AddInfor.str_Flash.Data_a8 = &InfoMeterBuff[0];
+                
+                xQueueSend(qMeter_SIM900Handle,(void *)&ptrQueue_Met_Addinfor,100);   
+                return 1;
+            }else
+                DCU_Respond(PortConfig,(uint8_t *)"ERROR", 5);  
+    return 0;
+}
+
+uint8_t Function_Get_LoadProfile(uint16_t Index_Start, uint16_t Index_End, uint8_t mode)
+{
+	uint8_t i = 0, j = 0;;
+	uint8_t Buff_Data_Set[11];	
+    uint8_t aB_DataSet_TotalPack[11];	
+	uint8_t Temp = 0;
+    uint16_t Index;
+    uint8_t Index_U8 = 0;
+    
+    if((Index_Start < Index_End) || (Index_End == 0)) return 0;
+    
+	HAL_UART_Transmit(&UART_DEBUG, (uint8_t*) "\r\nGet load profile ...\r\n", 24, 1000);
+	//doc cau hinh cua phu tai
+	if(FunctionRead_Meter(&Get_ConfigChart,&Data_Set_ReadConfigChart[0], 11) == 1)
+	{
+        for(Index = Index_Start; Index >= Index_End; Index--)   //doc lan luot thu tu ngay can doc
+        {
+            //copy data set vao
+            for(j = 0; j<11; j++)
+                aB_DataSet_TotalPack[j] = Data_Set_TotalPack[j];
+            
+            Index_U8 = (uint8_t) Index;    //lay byte thap truoc
+            //Set Ngay doc Lpf vào total Pack
+            Temp = ConvertHextoAscii((Index_U8 &0xF0) >> 4);
+            aB_DataSet_TotalPack[2] = Temp;    
+            Temp = ConvertHextoAscii(Index_U8 &0x0F);
+            aB_DataSet_TotalPack[3] = Temp;    
+            
+            Index_U8 = (uint8_t) (Index >> 8);     //lay byte cao
+            Temp = ConvertHextoAscii((Index_U8 &0xF0) >> 4);
+            aB_DataSet_TotalPack[4] = Temp;    
+            Temp = ConvertHextoAscii(Index_U8 &0x0F);
+            aB_DataSet_TotalPack[5] = Temp;    
+        
+            //lay tông so Pack trong ngay
+            if(FunctionRead_Meter(&Get_ToTalPack_inday,&aB_DataSet_TotalPack[0], 11) == 1)
+            {
+                StrUartTemp.Length_u16 = 0;   //Reset buff chua cac byte du
+                Met_Var.Str_Payload_Lpf.Data_a8 = &MeterLProfDataBuff[0];
+                
+                for(i = 1; i <= Met_Var.Loadpf.TotalPack; i++)
+                {                
+                    //copy data set vao
+                    for(j = 0; j<11; j++)
+                        Buff_Data_Set[j] = Data_Set_lpf_1[j];
+                    
+                    Index_U8 = (uint8_t) Index;    //lay byte thap truoc
+                    //Set Ngay doc Lpf vào total Pack
+                    Temp = ConvertHextoAscii((Index_U8 &0xF0) >> 4);
+                    Buff_Data_Set[2] = Temp;    
+                    Temp = ConvertHextoAscii(Index_U8 &0x0F);
+                    Buff_Data_Set[3] = Temp;    
+                    
+                    Index_U8 = (uint8_t) (Index >> 8);     //lay byte cao
+                    Temp = ConvertHextoAscii((Index_U8 &0xF0) >> 4);
+                    Buff_Data_Set[4] = Temp;    
+                    Temp = ConvertHextoAscii(Index_U8 &0x0F);
+                    Buff_Data_Set[5] = Temp;   
+                    
+                    //thay 2 byte 6 7 bang Index Pack
+                    Temp = ConvertHextoAscii((i &0xF0) >> 4);
+                    Buff_Data_Set[6] = Temp;    //khac nhau byte thu 6
+                    Temp = ConvertHextoAscii(i &0x0F);
+                    Buff_Data_Set[7] =  Temp;    //khac nhau byte thu 7
+                    
+
+                    if(FunctionRead_Meter(&FunExtract_In1Pack_lpf_1,&Buff_Data_Set[0], 11) == 0) return 0;
+                    
+                    //Kiem tra xem có lenh dung doc lpf khong. Van return 1;
+                    if(sInformation.Flag_Stop_ReadLpf == 1)
+                    {
+                        sInformation.Flag_Stop_ReadLpf = 0;
+                        return 1;
+                    }
+                    osDelay(20);
+                }
+            }
+            osDelay(20);
+        }
+	}
+		
+	return 1;
+}
+
+
+void Get_ToTalPack_inday (uint8_t pack)
+{
+	uint16_t length = 0;
+	uint16_t i = 0;
+	//2byte
+	Met_Var.Loadpf.TotalPack = 0;
+    HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+    
+	for(i = 0; i < 2; i++)
+	{
+		Met_Var.Loadpf.TotalPack |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+}
+
+
+void Get_ConfigChart (uint8_t pack)
+{
+	uint16_t length = 0;
+	uint16_t i = 0;
+	
+    HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+    
+	//4 byte cofi va 2 byte chu ki tich phan
+	Met_Var.Loadpf.Config_Source = 0;
+	
+	for(i = 0; i < 4; i++)
+	{
+		Met_Var.Loadpf.Config_Source |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+	
+	for(i = 0; i < 2; i++)
+	{
+		Met_Var.Loadpf.Period |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*i);
+		length += 2;
+	}
+	//Giai ma cac dai luong va period luon
+	Decode_LpfConfig(Met_Var.Loadpf.Config_Source);
+}
+
+
+void Decode_LpfConfig (uint32_t ValueConfig)
+{
+	uint8_t i = 0;
+	uint8_t j = 0;
+	
+    Met_Var.Loadpf.NumChannel = 0;
+	for(i = 0; i <18; i++)
+	{
+		if((uint8_t)((ValueConfig >>i) & 0x00000001) == 1)
+		{
+			for(j = 0; j < 24; j++)
+				Met_Var.Loadpf.DataLpf.Record.Data[Met_Var.Loadpf.NumChannel].Source = i;
+			
+			Met_Var.Loadpf.NumChannel++;
+		}
+	}
+}
+
+/*<STX>OBIScode(IDmeter)(starttime)(event)(period)(numchanel)(ch1)[(ch2)…]<CR><LF>(ch1value*unit1)[(ch2value*unit2)…]<ETX><BCC>
+?	OBIScode: 99.1.0
+*/
+
+void Pack_Header_lpf_Pushdata103 (truct_String* Payload, ST_TIME_FORMAT sTime, uint32_t Event)
+{
+     uint16_t i = 0;
+     
+    //STX
+    *(Payload->Data_a8 + Payload->Length_u16++) = STX;
+    //obiscode Intan
+    Copy_String_2(Payload, &Str_OB_LPF);
+    
+    //DCUID
+    *(Payload->Data_a8 + Payload->Length_u16++) = '(';
+    Copy_String_2(Payload, &sDCU.sDCU_id); 
+    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+    
+    //ID Meter
+    *(Payload->Data_a8 + Payload->Length_u16++) = '(';
+    Copy_String_2(Payload, &sDCU.sMeter_id_now);   
+    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+    
+    //Meter type
+    *(Payload->Data_a8 + Payload->Length_u16++) = '(';
+    Copy_String_2(Payload, &Str_MeterType_u8[sDCU.MeterType]);  
+    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+    
+    //Start time
+    *(Payload->Data_a8 + Payload->Length_u16++) = '('; 
+    Copy_String_STime(Payload, sTime);
+    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+    //event (0000)
+    Met_Var.Pos_Eventlpf = Payload->Length_u16;  //luu vi tri lai
+   
+    //period
+    *(Payload->Data_a8 + Payload->Length_u16++) = '('; 
+    Pack_HEXData_Frame(Payload,  (Met_Var.Loadpf.DataLpf.Header.Period/60), 0);
+    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+    //num channel
+    *(Payload->Data_a8 + Payload->Length_u16++) = '('; 
+    Pack_HEXData_Frame(Payload,  (Met_Var.Loadpf.NumChannel + 3), 0);
+    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+     //Lan luot cac obis cua channel
+    for(i = 0; i<Met_Var.Loadpf.NumChannel; i++)
+    {
+        if(Met_Var.Loadpf.DataLpf.Record.Data[i].Source  < 5)
+            Copy_String_2(Payload, &Str_Ob_lpf[Met_Var.Loadpf.DataLpf.Record.Data[i].Source]);
+    }
+    //Tu Ti He so nhan
+    Copy_String_2(Payload, &Str_Ob_Ti);  
+    Copy_String_2(Payload, &Str_Ob_Tu);        
+    Copy_String_2(Payload, &He_So_Nhan);
+}
+
+
+uint16_t Cut_DataFromRecord_1 (uint8_t Status, uint16_t Pos)
+{
+	uint16_t i = 0;
+	uint16_t j = 0;
+    uint8_t Flag_First_Record = 0;
+    uint8_t Buff_temp[20];
+    truct_String Str_eventlpf = {&Buff_temp[0], 0};
+    uint8_t Temp_Check = 0; //check xem byte tiep theo la Header k
+      
+    //Reset data
+    for(i = 0; i < Met_Var.Loadpf.NumChannel; i++)
+        Met_Var.Loadpf.DataLpf.Record.Data[i].Value = 0;
+    
+    //4byte UTC
+    Met_Var.Loadpf.DataLpf.Header.UTC_Time = 0;
+    for(j = 0; j < 4; j++)
+    {
+        Met_Var.Loadpf.DataLpf.Header.UTC_Time |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos)) << (8*j);
+        Pos += 2;
+    }
+    //2byte Period
+    Met_Var.Loadpf.DataLpf.Header.Period = 0;
+    for(j = 0; j < 2; j++)
+    {
+        Met_Var.Loadpf.DataLpf.Header.Period |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos)) << (8*j);
+        Pos += 2;
+    }
+    //4byte Config
+    Met_Var.Loadpf.DataLpf.Header.Cofig = 0;
+    for(j = 0; j < 4; j++)
+    {
+        Met_Var.Loadpf.DataLpf.Header.Cofig |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos)) << (8*j);
+        Pos += 2;
+    }
+    //1byte Crc
+    Met_Var.Loadpf.DataLpf.Header.Crc = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos);
+    Pos += 2;
+
+    if((Status == 0xF2) || (Status == 0xF4) || (Status == 0xF5) || (Status == 0xF7))  //neu la F2, F4 F5 F7 thi can lay thoi gian tron. cua khung du lieu phia truoc
+        Met_Var.Loadpf.DataLpf.Record.Stime = (Met_Var.Loadpf.DataLpf.Header.UTC_Time/Met_Var.Loadpf.DataLpf.Header.Period) *Met_Var.Loadpf.DataLpf.Header.Period;
+    else  Met_Var.Loadpf.DataLpf.Record.Stime =  Met_Var.Loadpf.DataLpf.Header.UTC_Time; 
+    
+    if(Get_Lpf_meter.Status_Header == 0)
+    {
+        Met_Var.Loadpf.DataLpf.Header.Status_Before = Status;
+        Epoch_to_date_time(&Met_Var.Loadpf.DataLpf.Record.sTimeRTC, Met_Var.Loadpf.DataLpf.Record.Stime);
+        Reset_Buff(&Met_Var.Str_Payload_Lpf);
+        Pack_Header_lpf_Pushdata103(&Met_Var.Str_Payload_Lpf, Met_Var.Loadpf.DataLpf.Record.sTimeRTC, 1);  //can sua lai even o day
+        Get_Lpf_meter.Status_Header = 1;
+    }
+    //bat dau cat data
+    while(Pos < (UART1_Control.UART1_Str_Recei.Length_u16 - 3 - (4+8*Met_Var.Loadpf.NumChannel)))   //-3 BYTE ) ETX BBC
+    {
+        //check xem. neu la header tiep. truong hop nay: co nghia la heade truoc khong có data. nhu vay se bo qua cái này
+        Temp_Check = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos);
+        if((Temp_Check >= 0xF0) && (Flag_First_Record == 0))
+        {
+            Get_Lpf_meter.Status_Header = 0;  //ghi lai header moi
+            return Pos;
+        }
+        
+        if(Flag_First_Record != 0) 
+            Met_Var.Loadpf.DataLpf.Record.Stime = (Met_Var.Loadpf.DataLpf.Record.Stime/Met_Var.Loadpf.DataLpf.Header.Period) *Met_Var.Loadpf.DataLpf.Header.Period + Met_Var.Loadpf.DataLpf.Header.Period;
+       
+        Flag_First_Record++;
+         //lay phan data
+        Met_Var.Loadpf.DataLpf.Record.Error = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos);  //phan tich error ra de cho vao event
+        Pos += 2;
+        for(i = 0; i < Met_Var.Loadpf.NumChannel; i++)
+        {
+            Met_Var.Loadpf.DataLpf.Record.Data[i].Value = 0;
+            for(j = 0; j < 4; j++)
+            {
+                Met_Var.Loadpf.DataLpf.Record.Data[i].Value |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos)) << (8*j);
+                Pos += 2;
+            }
+        }
+        Met_Var.Loadpf.DataLpf.Record.Crc = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos);
+        Pos += 2;
+        
+        Met_Var.Loadpf.NumRecord++;
+        
+        //Dong goi data theo 103
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = 0x0D;
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = 0x0A;
+        for(i = 0; i < Met_Var.Loadpf.NumChannel; i++)
+        {
+            if(Met_Var.Loadpf.DataLpf.Record.Data[i].Source  < 5)   //Chi lay 4 dai luong dau tien
+            {
+                *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+                Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t)Convert_float_2int(Met_Var.Loadpf.DataLpf.Record.Data[i].Value, SCALE_LPF), SCALE_LPF);
+                *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '*';
+                Copy_String_2(&Met_Var.Str_Payload_Lpf, &Unit_Lpf[Met_Var.Loadpf.DataLpf.Record.Data[i].Source]);    //don vi
+                *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+            }
+        }
+        //TU Ti He so nhan		
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+        Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Ti_Primary, SCALE_TU_TI); 
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '/';
+        Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Ti_Second, SCALE_TU_TI); 
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+        //Tu.	
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+        Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Tu_Primary, SCALE_TU_TI);
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '/';
+        Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Tu_Second, SCALE_TU_TI); 
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+        //he so nhan	
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+        Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.He_So_Nhan, SCALE_TU_TI); 
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';    
+        
+        Temp_Check = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos);
+        if((Temp_Check >= 0xF0) && (Pos < (UART1_Control.UART1_Str_Recei.Length_u16 - 6)))   //truong hop 1 byte crc cuoi cung cac ban ghi
+        {
+            //dung 1 byte status va 1 byte ERROR de phan tich event
+            Get_Event_Lpf (&Str_eventlpf, Met_Var.Loadpf.DataLpf.Header.Status_Before,  Met_Var.Loadpf.DataLpf.Record.Error);
+            Copy_String_toTaget(&Met_Var.Str_Payload_Lpf, Met_Var.Pos_Eventlpf, &Str_eventlpf); 
+            Push_Datalpf_toQueue();
+            return Pos;
+        } 
+    }
+    
+    //Copy phan du sang 1 buff khac de. Phan du se bang: TongLength_Uart -  (Length da cat + 3byte check dau) -  3byte cuoi.
+    for(i = 0; i < (UART1_Control.UART1_Str_Recei.Length_u16 - Pos - 3); i++)
+    {
+        *(StrUartTemp.Data_a8 + i) = *(UART1_Control.UART1_Str_Recei.Data_a8 + Pos + i);
+    }
+    StrUartTemp.Length_u16 = UART1_Control.UART1_Str_Recei.Length_u16 - Pos - 3;
+    
+    if(Flag_First_Record > 0)
+    {
+        //dung 1 byte status va 1 byte ERROR de phan tich event
+        Get_Event_Lpf (&Str_eventlpf, Met_Var.Loadpf.DataLpf.Header.Status_Before,  Met_Var.Loadpf.DataLpf.Record.Error);
+        Copy_String_toTaget(&Met_Var.Str_Payload_Lpf, Met_Var.Pos_Eventlpf, &Str_eventlpf); 
+        Push_Datalpf_toQueue();
+    }
+    
+    return (UART1_Control.UART1_Str_Recei.Length_u16 - 3);   //tra ve vi tri check da la cuoi cung roi. xem lai
+}
+
+/*	    //thu tu tu bit cao xuong bit thap
+     Loi phan cung       Pin yeu               Ðoi ti so VT-CT	  Ðoi mat khau	
+     Cau hình công to	 Thay doi thoi gian	    Cau hình moi      Ngày moi
+     Mat dien	         Sai thu tu pha         Quá dòng         Quá áp    	 
+     Thap áp	        Nguoc dòng dien	        Loi pha	         Mat cân bang pha 	
+*/
+
+void Get_Event_Lpf(truct_String* Str, uint8_t header_status, uint8_t Error_record)
+{
+//    uint16_t event = 0;
+    uint8_t test = 0x30;
+    Reset_Buff(Str);
+//    
+//    if((Error_record&0x01) == 1)            event += 0x0001;  //mat can bang pha
+//    if(((Error_record >> 1) & 0x01) == 1)   event |= 0xFFF7; //mat ap pha a
+//    if(((Error_record >> 2) & 0x01) == 1)   event |= 0xFFF7; //mat ap pha b
+//    if(((Error_record >> 3) & 0x01) == 1)   event |= 0xFFF7; //mat ap pha c
+//    
+//    if(((Error_record >> 4) & 0x01) == 1)   event |= 0xFFFB; //nguoc cuc tinh pha a
+//    if(((Error_record >> 5) & 0x01) == 1)   event |= 0xFFFB; //nguoc cuc tinh pha b
+//    if(((Error_record >> 6) & 0x01) == 1)   event |= 0xFFFB; //nguoc cuc tinh pha c
+//    
+//    if(header_status == 0xF0) event|= 0xFEFF;     //new date
+//    if(header_status == 0xF1) event|= 0xFDFF;     //new config
+//    if(header_status == 0xF2) event|= 0xFF7F;     //mat dien
+////    if(header_status == 0xF3) event|= 0x80;       //co dien    
+//    if(header_status == 0xF4) event|= 0xFBFF;    // thay doi thoi gian
+//    if(header_status == 0xF5) event|= 0xF7FF;     //new config cong to
+//    if(header_status == 0xF6) event|= 0xF7FF;         //new pass
+//    if(header_status == 0xF7) event|= 0xDFFF;         // new tu ti
+//    
+    
+    if(header_status == 0xF0) test= 0x31;     //new date
+    if(header_status == 0xF1) test= 0x32;     //new config
+    if(header_status == 0xF2) test= 0x33;     //mat dien
+    if(header_status == 0xF3) test= 0x34;       //co dien    
+    if(header_status == 0xF4) test= 0x35;    // thay doi thoi gian
+    if(header_status == 0xF5) test= 0x36;     //new config cong to
+    if(header_status == 0xF6) test= 0x37;         //new pass
+    if(header_status == 0xF7) test= 0x38;         // new tu ti
+    //copy event vao
+    
+    *(Str->Data_a8 + Str->Length_u16++) = '(';
+    *(Str->Data_a8 + Str->Length_u16++) = '0';
+    *(Str->Data_a8 + Str->Length_u16++) = '0';
+    *(Str->Data_a8 + Str->Length_u16++) = '0';
+    *(Str->Data_a8 + Str->Length_u16++) = test;
+    *(Str->Data_a8 + Str->Length_u16++) = ')';
+}
+
+
+void FunExtract_In1Pack_lpf_1(uint8_t Pack)
+{
+	uint16_t length = 0;
+	uint16_t i = 0;
+	uint16_t j = 0;
+    uint8_t  Flag_Have_Header = 0;
+    uint8_t  Temp_Check = 0;
+    uint8_t Buff_temp[20];
+    truct_String Str_eventlpf = {&Buff_temp[0], 0};
+    
+	//check length nhan:
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+    if(Pack == Met_Var.Loadpf.TotalPack)
+    {
+        Met_Var.Flag_Get_lpf_Ok = 1;
+    }
+    //Neu nhu co byte du o truoc, chen vao dau data buff uart. Nhung sau 3 ki tu dau
+    //dich cac byte ra phia sau: StrUartTemp.Length_u16 byte
+    for(j = (UART1_Control.UART1_Str_Recei.Length_u16 - 1); j>=3; j--)
+    {
+        *(UART1_Control.UART1_Str_Recei.Data_a8 + j + StrUartTemp.Length_u16) = *(UART1_Control.UART1_Str_Recei.Data_a8 + j);
+    }
+    for(i = 0; i < StrUartTemp.Length_u16; i++)
+    {
+        //chuyen cac byte vao dau data
+         *(UART1_Control.UART1_Str_Recei.Data_a8 + i + 3) = *(StrUartTemp.Data_a8 + i);
+    }
+    //cong them Length Uart them phan du
+    UART1_Control.UART1_Str_Recei.Length_u16 += StrUartTemp.Length_u16;
+    length += 3;  //3 byte dau tien 
+	//lay file header: 1byte status
+    while(length < (UART1_Control.UART1_Str_Recei.Length_u16 - 3))   //da co header thi can phai it nha 12 byte nua
+    {
+        Met_Var.Loadpf.DataLpf.Header.Status = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length);
+        length += 2;
+        
+        switch(Met_Var.Loadpf.DataLpf.Header.Status)
+        {
+            case 0xF0:  //new date
+                StrUartTemp.Length_u16 = 0;
+                length = Cut_DataFromRecord_1(0xF0, length);
+                break;
+            case 0xF1:
+                StrUartTemp.Length_u16 = 0;
+                length = Cut_DataFromRecord_1(0xF1, length); 
+                break;
+            case 0xF2:
+                StrUartTemp.Length_u16 = 0;
+                length = Cut_DataFromRecord_1(0xF2, length); 
+                break;
+            case 0xF3:
+                //Reset buff temp
+                StrUartTemp.Length_u16 = 0;
+                length = Cut_DataFromRecord_1(0xF3, length);           
+                break;
+            case 0xF4:
+                //Reset buff temp
+                StrUartTemp.Length_u16 = 0;
+                length = Cut_DataFromRecord_1(0xF4, length); 
+                break;
+            case 0xF5:
+                //Reset buff temp
+                StrUartTemp.Length_u16 = 0;
+                length = Cut_DataFromRecord_1(0xF5, length); 
+                break;
+            case 0xF6:        
+                //Reset buff temp
+                StrUartTemp.Length_u16 = 0;
+                length = Cut_DataFromRecord_1(0xF6, length); 
+                break;
+            case 0xF7:
+                StrUartTemp.Length_u16 = 0;
+                length = Cut_DataFromRecord_1(0xF7, length); 
+                break;
+            default:
+                //neu vao day thi tiep cai data theo status cu
+                length -= 2;   //tru de lay lai ERROR
+                Met_Var.Loadpf.DataLpf.Header.Status = 0;
+                
+                if(Get_Lpf_meter.Status_Header == 0)
+                {
+                    Met_Var.Loadpf.DataLpf.Header.Status_Before = 0;
+                    Epoch_to_date_time(&Met_Var.Loadpf.DataLpf.Record.sTimeRTC, (Met_Var.Loadpf.DataLpf.Record.Stime + Met_Var.Loadpf.DataLpf.Header.Period));   //stime cong them truoc de dong goi
+                    Reset_Buff(&Met_Var.Str_Payload_Lpf);
+                    Pack_Header_lpf_Pushdata103(&Met_Var.Str_Payload_Lpf, Met_Var.Loadpf.DataLpf.Record.sTimeRTC, 0);
+                    Get_Lpf_meter.Status_Header = 1;
+                }
+        
+                //bat dau cat data
+                while(length < (UART1_Control.UART1_Str_Recei.Length_u16 - 3 - (4+8*Met_Var.Loadpf.NumChannel)))   //-3 BYTE ) ETX BBC
+                {
+                    Met_Var.Loadpf.DataLpf.Record.Stime = (Met_Var.Loadpf.DataLpf.Record.Stime/Met_Var.Loadpf.DataLpf.Header.Period) *Met_Var.Loadpf.DataLpf.Header.Period + Met_Var.Loadpf.DataLpf.Header.Period;
+                     //lay phan data
+                    Met_Var.Loadpf.DataLpf.Record.Error = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length);
+                    length += 2;
+                    for(i = 0; i < Met_Var.Loadpf.NumChannel; i++)
+                    {
+                        Met_Var.Loadpf.DataLpf.Record.Data[i].Value = 0;
+                        for(j = 0; j < 4; j++)
+                        {
+                            Met_Var.Loadpf.DataLpf.Record.Data[i].Value |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length)) << (8*j);
+                            length += 2;
+                        }
+                    }
+                    Met_Var.Loadpf.DataLpf.Record.Crc = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length);
+                    length += 2;
+                    
+                    Met_Var.Loadpf.NumRecord++;
+                    //Dong goi data theo 103
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = 0x0D;
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = 0x0A;
+                    for(i = 0; i < Met_Var.Loadpf.NumChannel; i++)
+                    {
+                        if(Met_Var.Loadpf.DataLpf.Record.Data[i].Source  < 5)   //Chi lay 4 dai luong dau tien
+                        {
+                            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+                            Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t)Convert_float_2int(Met_Var.Loadpf.DataLpf.Record.Data[i].Value, SCALE_LPF), SCALE_LPF);
+                            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '*';
+                            Copy_String_2(&Met_Var.Str_Payload_Lpf, &Unit_Lpf[Met_Var.Loadpf.DataLpf.Record.Data[i].Source]);    //don vi
+                            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+                        }
+                    }
+                    //TU Ti He so nhan		
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+                    Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Ti_Primary, SCALE_TU_TI); 
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '/';
+                    Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Ti_Second, SCALE_TU_TI); 
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+                    //Tu.	
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+                    Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Tu_Primary, SCALE_TU_TI);
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '/';
+                    Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Tu_Second, SCALE_TU_TI); 
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+                    //he so nhan	
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+                    Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.He_So_Nhan, SCALE_TU_TI); 
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+                    
+                    //check xem. neu la header tiep.
+                    Temp_Check = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length);
+                    if((Temp_Check >= 0xF0) && (length < (UART1_Control.UART1_Str_Recei.Length_u16 - 6)))  //crc 1 byte nhung nhan 2 kí tu
+                    {
+                        //dung 1 byte status va 1 byte ERROR de phan tich event
+                        Get_Event_Lpf (&Str_eventlpf, Met_Var.Loadpf.DataLpf.Header.Status_Before,  Met_Var.Loadpf.DataLpf.Record.Error);
+                        Copy_String_toTaget(&Met_Var.Str_Payload_Lpf, Met_Var.Pos_Eventlpf, &Str_eventlpf); 
+                        Push_Datalpf_toQueue();
+                        Flag_Have_Header = 1;
+                        break;
+                    }else
+                        Flag_Have_Header = 0;
+                }
+                if(Flag_Have_Header == 0)
+                {
+                    //Copy phan du sang 1 buff khac de. Phan du se bang: TongLength_Uart -  (Length da cat + 3byte check dau) -  3byte cuoi.
+                    for(i = 0; i < (UART1_Control.UART1_Str_Recei.Length_u16 - length - 3); i++)
+                    {
+                        *(StrUartTemp.Data_a8 + i) = *(UART1_Control.UART1_Str_Recei.Data_a8 + length + i);
+                    }
+                    StrUartTemp.Length_u16 = UART1_Control.UART1_Str_Recei.Length_u16 - length - 3;
+                    
+                    Get_Event_Lpf (&Str_eventlpf, Met_Var.Loadpf.DataLpf.Header.Status_Before,  Met_Var.Loadpf.DataLpf.Record.Error);
+                    Copy_String_toTaget(&Met_Var.Str_Payload_Lpf, Met_Var.Pos_Eventlpf, &Str_eventlpf); 
+                    Push_Datalpf_toQueue();
+                        
+                    length = UART1_Control.UART1_Str_Recei.Length_u16 - 3;
+                }
+                break;
+        }
+    }
+}
+
+
+uint8_t Push_Datalpf_toQueue (void)
+{
+    uint16_t i = 0;
+    uint8_t Temp_BBC = 0;
+    uint32_t temp = 0;
+    
+    //ETX và BBC
+    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ETX;
+    Temp_BBC = BBC_Cacul(Met_Var.Str_Payload_Lpf.Data_a8 + 1,Met_Var.Str_Payload_Lpf.Length_u16 - 1);
+    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = Temp_BBC;
+    
+    //Day sang queue
+    //Them length trong phan luu flash
+    for(uint16_t i = 0; i < Met_Var.Str_Payload_Lpf.Length_u16; i++)
+        *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16 + 1 - i) = *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16 - i - 1);
+    
+    Met_Var.Str_Payload_Lpf.Length_u16 += 2;
+    *(Met_Var.Str_Payload_Lpf.Data_a8)     = (uint8_t) ((Met_Var.Str_Payload_Lpf.Length_u16 + 1) >> 8) ;
+    *(Met_Var.Str_Payload_Lpf.Data_a8 + 1) = (uint8_t) (Met_Var.Str_Payload_Lpf.Length_u16 + 1) ;
+    
+    //Generate checksum byte
+    for (i=0;i<Met_Var.Str_Payload_Lpf.Length_u16;i++)
+        temp += *(Met_Var.Str_Payload_Lpf.Data_a8 + i);
+    
+    temp = temp & 0x000000FF;
+    
+    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16) = (uint8_t)temp;
+    Met_Var.Str_Payload_Lpf.Length_u16++;
+    
+    Queue_Meter_LProf.Mess_Direct_ui8 = 1;
+    Queue_Meter_LProf.str_Flash.Length_u16 = Met_Var.Str_Payload_Lpf.Length_u16;
+    Queue_Meter_LProf.Mess_Status_ui8 = 0;
+    Queue_Meter_LProf.Mess_Type_ui8 = DATA_LOAD_PROFILE;
+    Queue_Meter_LProf.str_Flash.Data_a8 = Met_Var.Str_Payload_Lpf.Data_a8;
+    
+    xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_LProf,100);
+    
+    Get_Lpf_meter.Status_Header = 0 ; //cho phep ghi header cho ban tin tiep theo
+    
+    Met_Var.LandMark_Check_TimeOut = RT_Count_Systick_u32;
+                    
+    if (osMutexRelease(mtFlashMeterHandle) != osOK)
+        osMutexRelease(mtFlashMeterHandle);
+    //Delay cho send thanh cong tung goi tin roi moi doc tiep
+    while (Queue_Meter_LProf.Mess_Status_ui8 == 0)    //Gui qua task flash de luu. se set status = 1
+    {
+        if(Check_Time_Out(Met_Var.LandMark_Check_TimeOut, 60000) == 1)
+        {
+            return 0;
+        }
+        osDelay(50);
+    }
+    
+    if (osMutexWait(mtFlashMeterHandle,5000) != osOK)
+        return 0;
+    
+    return 1;
+}
+
+
+void Cut_DataFromRecord_2 (uint8_t Status, uint16_t Pos)
+{
+	uint16_t i = 0;
+	uint16_t j = 0;
+    uint8_t  Flag_First_Record = 0;  
+    
+    //Reset data
+    for(i = 0; i < Met_Var.Loadpf.NumChannel; i++)
+        Met_Var.Loadpf.DataLpf.Record.Data[i].Value = 0;
+//    Met_Var.Loadpf.NumRecord = 0;
+    //4byte UTC
+    Met_Var.Loadpf.DataLpf.Header.UTC_Time = 0;
+    for(j = 0; j < 4; j++)
+    {
+        Met_Var.Loadpf.DataLpf.Header.UTC_Time |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos)) << (8*j);
+        Pos += 2;
+    }
+    //2byte Period
+    Met_Var.Loadpf.DataLpf.Header.Period = 0;
+    for(j = 0; j < 2; j++)
+    {
+        Met_Var.Loadpf.DataLpf.Header.Period |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos)) << (8*j);
+        Pos += 2;
+    }
+    //4byte Config
+    Met_Var.Loadpf.DataLpf.Header.Cofig = 0;
+    for(j = 0; j < 4; j++)
+    {
+        Met_Var.Loadpf.DataLpf.Header.Cofig |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos)) << (8*j);
+        Pos += 2;
+    }
+    //1byte Crc
+    Met_Var.Loadpf.DataLpf.Header.Crc = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos);
+    Pos += 2;
+    
+    Met_Var.Loadpf.DataLpf.Record.Stime = Met_Var.Loadpf.DataLpf.Header.UTC_Time;
+    
+    //bat dau cat data
+    while(Pos < (UART1_Control.UART1_Str_Recei.Length_u16 - 3 - (4+8*Met_Var.Loadpf.NumChannel)))   //-3 BYTE ) ETX BBC
+    {
+        if(Flag_First_Record == 0) Met_Var.Loadpf.DataLpf.Record.Stime = (Met_Var.Loadpf.DataLpf.Header.UTC_Time/Met_Var.Loadpf.DataLpf.Header.Period) *Met_Var.Loadpf.DataLpf.Header.Period;
+        else Met_Var.Loadpf.DataLpf.Record.Stime = (Met_Var.Loadpf.DataLpf.Record.Stime/Met_Var.Loadpf.DataLpf.Header.Period) *Met_Var.Loadpf.DataLpf.Header.Period + Met_Var.Loadpf.DataLpf.Header.Period;
+       
+        Flag_First_Record++;
+         //lay phan data
+        Met_Var.Loadpf.DataLpf.Record.Error = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos);
+        Pos += 2;
+        for(i = 0; i < Met_Var.Loadpf.NumChannel; i++)
+        {
+            Met_Var.Loadpf.DataLpf.Record.Data[i].Value = 0;
+            for(j = 0; j < 4; j++)
+            {
+                Met_Var.Loadpf.DataLpf.Record.Data[i].Value |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos)) << (8*j);
+                Pos += 2;
+            }
+        }
+        Met_Var.Loadpf.DataLpf.Record.Crc = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + Pos);
+        Pos += 2;
+        
+        Met_Var.Loadpf.NumRecord++;
+    }
+    
+    //Copy phan du sang 1 buff khac de. Phan du se bang: TongLength_Uart -  (Length da cat + 3byte check dau) -  3byte cuoi.
+    for(i = 0; i < (UART1_Control.UART1_Str_Recei.Length_u16 - Pos - 3); i++)
+    {
+        *(StrUartTemp.Data_a8 + i) = *(UART1_Control.UART1_Str_Recei.Data_a8 + Pos + i);
+    }
+    StrUartTemp.Length_u16 = UART1_Control.UART1_Str_Recei.Length_u16 - Pos - 3;
+}
+
+void FunExtract_In1Pack_lpf_2(uint8_t Pack)
+{
+	uint16_t length = 0;
+	uint16_t i = 0;
+	uint16_t j = 0;
+    uint8_t Temp_BBC = 0;
+	uint32_t temp = 0;
+    
+	//check length nhan:
+	HAL_UART_Transmit(&UART_DEBUG, UART1_Control.UART1_Str_Recei.Data_a8, UART1_Control.UART1_Str_Recei.Length_u16, 1000);
+	
+    //Neu nhu co byte du o truoc, chen vao dau data buff uart. Nhung sau 3 ki tu dau
+    //dich cac byte ra phia sau: StrUartTemp.Length_u16 byte
+    for(j = (UART1_Control.UART1_Str_Recei.Length_u16 - 1); j>=3; j--)
+    {
+        *(UART1_Control.UART1_Str_Recei.Data_a8 + j + StrUartTemp.Length_u16) = *(UART1_Control.UART1_Str_Recei.Data_a8 + j);
+    }
+    for(i = 0; i < StrUartTemp.Length_u16; i++)
+    {
+        //chuyen cac byte vao dau data
+         *(UART1_Control.UART1_Str_Recei.Data_a8 + i + 3) = *(StrUartTemp.Data_a8 + i);
+    }
+    //cong them Length Uart them phan du
+    UART1_Control.UART1_Str_Recei.Length_u16 += StrUartTemp.Length_u16;
+    
+	//lay file header: 1byte status
+    Met_Var.Loadpf.DataLpf.Header.Status_Before = Met_Var.Loadpf.DataLpf.Header.Status;
+	Met_Var.Loadpf.DataLpf.Header.Status = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+	length += 2;
+    
+//    Met_Var.Loadpf.NumRecord = 0;
+    
+    switch(Met_Var.Loadpf.DataLpf.Header.Status)
+    {
+        case 0xF0:
+            StrUartTemp.Length_u16 = 0;
+            Cut_DataFromRecord_2(0xF0, length + 3);
+            break;
+        case 0xF1:
+            StrUartTemp.Length_u16 = 0;
+            Cut_DataFromRecord_2(0xF1, length + 3);
+            break;
+        case 0xF2:
+            StrUartTemp.Length_u16 = 0;
+            Cut_DataFromRecord_2(0xF2, length + 3);
+            break;
+        case 0xF3:
+            //Reset buff temp
+            StrUartTemp.Length_u16 = 0;
+            Cut_DataFromRecord_2(0xF3, length + 3);           
+            break;
+        case 0xF4:
+            //Reset buff temp
+            StrUartTemp.Length_u16 = 0;
+            Cut_DataFromRecord_2(0xF4, length + 3);
+            break;
+        case 0xF5:
+            //Reset buff temp
+            StrUartTemp.Length_u16 = 0;
+            Cut_DataFromRecord_2(0xF5, length + 3);
+            break;
+        case 0xF6:        
+            //Reset buff temp
+            StrUartTemp.Length_u16 = 0;
+            Cut_DataFromRecord_2(0xF6, length + 3);
+            break;
+        case 0xF7:
+            StrUartTemp.Length_u16 = 0;
+            Cut_DataFromRecord_2(0xF7, length + 3);
+            break;
+        default:
+            //neu vao day thi tiep cai data theo status cu
+            length -= 2;   //tru de lay lai ERROR
+//            Met_Var.Loadpf.DataLpf.Header.Status = Met_Var.Loadpf.DataLpf.Header.Status_Before;
+            Met_Var.Loadpf.DataLpf.Header.Status = 0;   //De tam day de test
+            //bat dau cat data
+            while((length + 3) < (UART1_Control.UART1_Str_Recei.Length_u16 - 3 - (4+8*Met_Var.Loadpf.NumChannel)))   //-3 BYTE ) ETX BBC
+            {
+                Met_Var.Loadpf.DataLpf.Record.Stime = (Met_Var.Loadpf.DataLpf.Record.Stime/Met_Var.Loadpf.DataLpf.Header.Period) *Met_Var.Loadpf.DataLpf.Header.Period + Met_Var.Loadpf.DataLpf.Header.Period;
+                 //lay phan data
+                Met_Var.Loadpf.DataLpf.Record.Error = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+                length += 2;
+                for(i = 0; i < Met_Var.Loadpf.NumChannel; i++)
+                {
+                    Met_Var.Loadpf.DataLpf.Record.Data[i].Value = 0;
+                    for(j = 0; j < 4; j++)
+                    {
+                        Met_Var.Loadpf.DataLpf.Record.Data[i].Value |=  (Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3)) << (8*j);
+                        length += 2;
+                    }
+                }
+                Met_Var.Loadpf.DataLpf.Record.Crc = Convert2ByteHexStringto_1Hex(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3);
+                length += 2;
+                
+                Met_Var.Loadpf.NumRecord++;
+            }
+            
+            //Copy phan du sang 1 buff khac de. Phan du se bang: TongLength_Uart -  (Length da cat + 3byte check dau) -  3byte cuoi.
+            for(i = 0; i < (UART1_Control.UART1_Str_Recei.Length_u16 - (length + 3) - 3); i++)
+            {
+                *(StrUartTemp.Data_a8 + i) = *(UART1_Control.UART1_Str_Recei.Data_a8 + length + 3 + i);
+            }
+            StrUartTemp.Length_u16 = UART1_Control.UART1_Str_Recei.Length_u16 - (length + 3) - 3;
+            break;
+    }
+    
+    if(Pack == Met_Var.Loadpf.TotalPack)
+    {
+        //check stime xem co nam trong khoang thoi gian can lay khong. Neu co thi dong goi day sang queue
+//        if(Met_Var.Loadpf.DataLpf.Record.Stime >= (((Met_Var.sTime_s/Met_Var.Loadpf.DataLpf.Header.Period) * Met_Var.Loadpf.DataLpf.Header.Period) - Met_Var.Loadpf.DataLpf.Header.Period))
+//        {
+            Met_Var.Str_Payload_Lpf.Data_a8 += Met_Var.Str_Payload_Lpf.Length_u16;
+            Met_Var.Str_Payload_Lpf.Length_u16 = 0;
+            
+            //Dong goi phan dau mao cho Payload lpf 103
+    //        if(Met_Var.Loadpf.NumRecord > 1) // chen event khac
+            
+            Epoch_to_date_time(&Met_Var.Loadpf.DataLpf.Record.sTimeRTC, Met_Var.Loadpf.DataLpf.Record.Stime);
+            Pack_Header_lpf_Pushdata103(&Met_Var.Str_Payload_Lpf, Met_Var.Loadpf.DataLpf.Record.sTimeRTC, (Met_Var.Loadpf.DataLpf.Header.Status & 0x0F));
+            //Dong goi data cua record vao Buff luu vao flash. cac obis dai luong sap xep tuan tu o tren roi.
+            for(i = 0; i < Met_Var.Loadpf.NumChannel; i++)
+            {
+                if(Met_Var.Loadpf.DataLpf.Record.Data[i].Source  < 5)   //Chi lay 4 dai luong dau tien
+                {
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+                    Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t)Convert_float_2int(Met_Var.Loadpf.DataLpf.Record.Data[i].Value, SCALE_LPF), SCALE_LPF);
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '*';
+                    Copy_String_2(&Met_Var.Str_Payload_Lpf, &Unit_Lpf[Met_Var.Loadpf.DataLpf.Record.Data[i].Source]);    //don vi
+                    *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+                }
+            }
+            //TU Ti He so nhan
+            //Ti.		
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+            Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Ti_Primary, SCALE_TU_TI); 
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '/';
+            Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Ti_Second, SCALE_TU_TI); 
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+            //Tu.	
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+            Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Tu_Primary, SCALE_TU_TI);
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '/';
+            Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.Tu_Second, SCALE_TU_TI); 
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+            //he so nhan	
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = '(';
+            Pack_HEXData_Frame(&Met_Var.Str_Payload_Lpf, (int64_t) Met_Var.He_So_Nhan, SCALE_TU_TI); 
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ')';
+            //ETX và BBC
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = ETX;
+            Temp_BBC = BBC_Cacul(Met_Var.Str_Payload_Lpf.Data_a8 + 1,Met_Var.Str_Payload_Lpf.Length_u16 - 1);
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16++) = Temp_BBC;
+            
+            //Day sang queue
+            //Them length trong phan luu flash
+            for(uint16_t i = 0; i < Met_Var.Str_Payload_Lpf.Length_u16; i++)
+                *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16 + 1 - i) = *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16 - i - 1);
+            
+            Met_Var.Str_Payload_Lpf.Length_u16 += 2;
+            *(Met_Var.Str_Payload_Lpf.Data_a8)     = (uint8_t) ((Met_Var.Str_Payload_Lpf.Length_u16 + 1) >> 8) ;
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + 1) = (uint8_t) (Met_Var.Str_Payload_Lpf.Length_u16 + 1) ;
+            
+            //Generate checksum byte
+            for (i=0;i<Met_Var.Str_Payload_Lpf.Length_u16;i++)
+                temp += *(Met_Var.Str_Payload_Lpf.Data_a8 + i);
+            
+            temp = temp & 0x000000FF;
+            
+            *(Met_Var.Str_Payload_Lpf.Data_a8 + Met_Var.Str_Payload_Lpf.Length_u16) = (uint8_t)temp;
+            Met_Var.Str_Payload_Lpf.Length_u16++;
+            
+            Queue_Meter_LProf.Mess_Direct_ui8 = 1;
+            Queue_Meter_LProf.str_Flash.Length_u16 = Met_Var.Str_Payload_Lpf.Length_u16;
+            Queue_Meter_LProf.Mess_Status_ui8 = 0;
+            Queue_Meter_LProf.Mess_Type_ui8 = DATA_LOAD_PROFILE;
+            Queue_Meter_LProf.str_Flash.Data_a8 = Met_Var.Str_Payload_Lpf.Data_a8;
+            
+            xQueueSend(qMeter_FlashHandle,(void *)&ptrQueue_Meter_LProf,100);
+//        }
+    }
+    
+    Met_Var.Flag_Get_lpf_Ok = 1;
+}
+
+
+
+void Clear_OldData_Tariff (StructDL_Tariff* Dl_Tariff)
+{
+    Dl_Tariff->Flag_get_Ok = 0;
+    Dl_Tariff->NumRate = 0;
+}
+
+void Class_Tariff (void)
+{
+    uint8_t i = 0;
+    uint8_t j = 0;
+    
+    //Clear data Tariff cua cac dai luong ve 0;
+    Clear_OldData_Tariff(&Met_Var.ActiveEnerPlus);
+    Clear_OldData_Tariff(&Met_Var.ActiveEnerSub);
+    Clear_OldData_Tariff(&Met_Var.ReacEnerPlus);
+    Clear_OldData_Tariff(&Met_Var.ReacEnerSub);;   
+    
+    for(i =0; i < 4; i++)
+      for(j= 0; j < 8; j++)
+      {
+        switch (Met_Var.Tariff_G[i][j].Source)
+        {
+            case 0x01:  //Active Energy plus
+                Met_Var.ActiveEnerPlus.Rate[Met_Var.ActiveEnerPlus.NumRate++] = Met_Var.Tariff_G[i][j].Value;
+                Met_Var.ActiveEnerPlus.Flag_get_Ok = 1;
+                break;
+            case 0x02:  //Active Energy Sub 
+                Met_Var.ActiveEnerSub.Rate[Met_Var.ActiveEnerSub.NumRate++] = Met_Var.Tariff_G[i][j].Value;
+                Met_Var.ActiveEnerSub.Flag_get_Ok = 1;
+                break;
+            case 0x18:  //Reactive Energy plus  
+                Met_Var.ReacEnerPlus.Rate[Met_Var.ReacEnerPlus.NumRate++] = Met_Var.Tariff_G[i][j].Value;
+                Met_Var.ReacEnerPlus.Flag_get_Ok = 1;
+                break;
+            case 0x60:   //Reactive Energy Sub
+                Met_Var.ReacEnerSub.Rate[Met_Var.ReacEnerSub.NumRate++] = Met_Var.Tariff_G[i][j].Value;
+                Met_Var.ReacEnerSub.Flag_get_Ok = 1;
+                break;
+            default:
+                break;
+        }
+      }
+}
+
+void Clear_OldData_MaxDemand(Struct_MaxDemand_Convert *MaxDemand)
+{
+    MaxDemand->Flag_get_Ok = 0;
+    MaxDemand->NumRate = 0;
+}
+
+void Class_MaxDemand (Struct_MaxDemand_Convert* MD_Plus, Struct_MaxDemand_Convert* MD_Sub, Struct_MaxDemand *Array)
+{
+    uint8_t i = 0;
+    
+    //Clear data Tariff cua cac dai luong ve 0;
+    Clear_OldData_MaxDemand(MD_Plus);
+    Clear_OldData_MaxDemand(MD_Sub);
+    
+    for(i =0; i < 8; i++)
+        switch (Array[i].Source)
+        {
+            case 0x01:  //Active Energy plus
+                MD_Plus->Rate[MD_Plus->NumRate].Value = Array[i].Number[0].Value;
+                MD_Plus->Rate[MD_Plus->NumRate].Time  = Array[i].Number[0].Time;
+                MD_Plus->NumRate += 1;
+                MD_Plus->Flag_get_Ok = 1;
+                break;
+            case 0x02:  //Active Energy Sub 
+                MD_Sub->Rate[MD_Sub->NumRate].Value = Array[i].Number[0].Value;
+                MD_Sub->Rate[MD_Sub->NumRate].Time  = Array[i].Number[0].Time;
+                MD_Sub->NumRate += 1;
+                MD_Sub->Flag_get_Ok = 1;
+                break;
+            default:
+                break;
+      }
+}
+
+
+
+//Dong goi ban tin opera theo dinh dang Push data
+// - <STX>OBIScode(DCUID)(IDmeter)(timelabel)(numqty)(data1)[(data2)…](data1value*unit1)[(data2value*unit2)…]<ETX><BCC>
+//ban tin 1 cho các gia tri tuc thoi
+
+uint8_t Pack_PushData_103_Opera_1 (void)
+{ 
+    uint16_t  i = 0;
+    uint16_t PosNumqty = 0;
+    uint16_t Countqty = 0;
+    uint8_t BuffnumqtyDec[4];
+    truct_String StrDecNumqty = {&BuffnumqtyDec[0], 0};
+    uint8_t Temp_BBC = 0;
+    truct_String Buff_Event = {(uint8_t*) "(C.7.0)(C.7.10)(C.51.13)(C.51.14)(C.51.84)(C.51.86)(C.51.88)(C.51.90)(C.51.92)(C.51.94)(C.51.7)(C.51.8)(C.51.15)(C.51.16)", 121};
+    truct_String Buff_DaEvent = {(uint8_t*) "(2002131130)(6)(200214174012)(6)(200214174016)(0000000000)(0000000000)(0000000000)(0000000000)(0000000000)(0000000000)(0)(0000000000)(0)(0000000000)", 148};
+    
+    if((Met_Var.Flag_GetIntan_Ok == 0) || (Met_Var.Flag_Get_Tariff_Ok == 0) || (Met_Var.Flag_Get_MaxDemand_Ok ==0)|| (Met_Var.Flag_Get_EnRegister_Ok == 0))
+        return 0;
+    
+    Class_Tariff();
+    Class_MaxDemand(&Met_Var.MaxDemndPlusRate, &Met_Var.MaxDemndSubRate, &Met_Var.MaxDemand_G[0]);
+      
+    Met_Var.Str_Payload_TSVH.Data_a8 = &MeterInfoDataBuff[0];
+    Met_Var.Str_Payload_TSVH_2.Data_a8 = &MeterInfoDataBuff_2[0];
+      
+    Reset_Buff(&Met_Var.Str_Payload_TSVH);
+    Reset_Buff(&Met_Var.Str_Payload_TSVH_2);
+    //STX
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = STX;
+    //obiscode Intan
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_OB_INTAN);
+
+    //DCUID
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &sDCU.sDCU_id); 
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    //ID Meter
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &sDCU.sMeter_id_now);  
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+
+    //Meter type
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_MeterType_u8[sDCU.MeterType]);  
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    //Timlabel
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '('; 
+    Copy_String_STime(&Met_Var.Str_Payload_TSVH,Met_Var.STimeIntan);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    //numqty
+    PosNumqty = Met_Var.Str_Payload_TSVH.Length_u16;
+       
+    //0 1 2.(dien ap A B C) 3 4 5 (dong dien A B C) 6 7 8.(tan so A B C) 
+    //9 10 11 12(Goc lech A B C trung binh) .
+    // 13, 14, 15 ,16  (he so cong suat A B C trung binh)
+    
+    // Dien ap A, B C, 	    
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_VolA);  
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_VolB);
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_VolC);  
+    //dong dien A, B , C
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_CurA);  
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_CurB);
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_CurC);  
+//    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_CurNeu);   
+    
+    // He so công suat A, B, C, trung bình.	
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_PoFacA);  
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_PoFacB);
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_PoFacC);
+    
+    //+ Công suat tác dug pha A, B, C tong:  21.7.0	41.7.0  61.7.0  1.7.0
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_AcPowA);  
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_AcPowB);
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_AcPowC); 
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_AcPowTo);  
+    
+    //Công suat phan kháng pha A, B, C, tong.  
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_RePowA);  
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_RePowB);
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_RePowC);
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_RePowTo); 
+          
+    //tan so
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_Freq); 
+    //nang luong Importwh tong bieu 1 2 3  
+    Countqty += 18;
+
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_En_ImportWh);  
+    Countqty ++;
+    
+    if(Met_Var.ActiveEnerPlus.Flag_get_Ok == 1)
+    {
+        for(i = 0; i < Met_Var.ActiveEnerPlus.NumRate; i++)
+        {
+          if(i == 0) Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_AcPlus_Rate1);
+          else if(i == 1) Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_AcPlus_Rate2);
+          else if(i == 2) Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_AcPlus_Rate3);
+          else break;
+          Countqty++;
+        }
+    }
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_En_ExportWh);
+    Countqty++;
+    if(Met_Var.ActiveEnerSub.Flag_get_Ok == 1)
+    {
+        for(i = 0; i < Met_Var.ActiveEnerSub.NumRate; i++)
+        {
+          if(i == 0) Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_AcSub_Rate1);
+          else if(i == 1) Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_AcSub_Rate2);
+          else if(i == 2) Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_AcSub_Rate3);
+          else break;
+          Countqty++;
+        }
+    }
+
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_En_ImportVar); 
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_En_ExportVar);
+        
+    Countqty += 2;
+    //gia tri thanh ghi maxdemand
+    if(Met_Var.Flag_Get_MaxDemand_Ok == 1)
+    {
+        if(Met_Var.MaxDemndPlusRate.NumRate > 3) Met_Var.MaxDemndPlusRate.NumRate = 3;
+        
+        for(i = 0; i < Met_Var.MaxDemndPlusRate.NumRate; i++)
+        {
+            //them các gia tri maxdemand vao
+            if(i == 0) Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_MaxDeRate1);  
+            if(i == 0) Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_MaxDeRate2);
+            if(i == 0) Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_MaxDeRate3); 
+            
+            Countqty++;
+        }
+    }
+    //su kien mat dien có dien
+    //(C.7.0)(C.7.10)(C.51.13)(C.51.14)(C.51.84)(C.51.86)(C.51.88)(C.51.90)(C.51.92)(C.51.94)(C.51.7)(C.51.8)(C.51.15)(C.51.16)
+//    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Buff_Event); 
+    //cho xem da
+//    Countqty+=14;
+    
+    //Tu.	
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_Ti);  
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Str_Ob_Tu);        
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &He_So_Nhan);  
+    
+    Countqty+=3;
+     //
+    ConvertHexDatatoStringDec(Countqty, &StrDecNumqty);
+    //dich buff tu vi tri PosNumqty sang phia sau. de lay cho ghep numqty vao.
+    for(i = 0 ; i < (Met_Var.Str_Payload_TSVH.Length_u16 - PosNumqty); i++)
+    {
+        *(Met_Var.Str_Payload_TSVH.Data_a8 + (Met_Var.Str_Payload_TSVH.Length_u16 - 1 - i)+ (StrDecNumqty.Length_u16 + 2)) = *(Met_Var.Str_Payload_TSVH.Data_a8 + (Met_Var.Str_Payload_TSVH.Length_u16 - 1 - i));
+    }
+    Met_Var.Str_Payload_TSVH.Length_u16 += (StrDecNumqty.Length_u16 + 2);
+    
+    //ghi lai numqty
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + PosNumqty) = '(';
+    for(i = 0; i < StrDecNumqty.Length_u16; i++)
+    {
+        *(Met_Var.Str_Payload_TSVH.Data_a8 + PosNumqty + i + 1) = *(StrDecNumqty.Data_a8 + i);
+    }
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + PosNumqty + i + 1) = ')';  
+    //them \r\n
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = 0x0D;
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = 0x0A;
+ 
+    //0 1 2.(dien ap A B C) 3 4 5 (dong dien A B C) 6 7 8.(tan so A B C) 
+    //9 10 11 12(Goc lech A B C trung binh) .
+    // 13, 14, 15 ,16  (he so cong suat A B C trung binh)
+    
+    // Dien ap A, B C, 	    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanValue[0]), SCALE_VOLTAGE);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Voltage);  //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanValue[1]), SCALE_VOLTAGE);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Voltage);  //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanValue[2]), SCALE_VOLTAGE);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Voltage);  //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    // Dong dien A, B C, NEU
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanValue[3]), SCALE_CURRENT);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Current);  //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanValue[4]), SCALE_CURRENT);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Current); //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanValue[5]), SCALE_CURRENT);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Current);   //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '0';
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+//
+//    // tan so A, B C, 
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanValue[6]), SCALE_FREQ);
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+//    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Freq);    //don vi
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+//    
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanValue[7]),SCALE_FREQ);
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+//    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Freq);     //don vi
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+//    
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanValue[8]),SCALE_FREQ);
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+//    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Freq);    //don vi
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+//    
+//    //Góc lech A, B, C, trung bình.	luu duoi dang float
+//            
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t)Convert_float_2int(Buff_IntanValue[9], SCALE_ANGLE_PHASE), SCALE_ANGLE_PHASE);
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+//    
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t)Convert_float_2int(Buff_IntanValue[10], SCALE_ANGLE_PHASE), SCALE_ANGLE_PHASE);
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+//    
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t)Convert_float_2int(Buff_IntanValue[11], SCALE_ANGLE_PHASE), SCALE_ANGLE_PHASE);
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+
+    // He so công suat A, B, C, trung bình.	
+
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint16_2int16((uint16_t)Buff_IntanValue[13]),SCALE_POW_FACTOR);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint16_2int16((uint16_t)Buff_IntanValue[14]), SCALE_POW_FACTOR);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+            
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint16_2int16((uint16_t)Buff_IntanValue[15]), SCALE_POW_FACTOR);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+
+    //+ Công suat tác dug pha A, B, C tong: 
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint64_2int64(Buff_IntanPower[0]), SCALE_ACTIVE_POW);  
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Active_Intan);    //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint64_2int64(Buff_IntanPower[1]), SCALE_ACTIVE_POW);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Active_Intan);     //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint64_2int64(Buff_IntanPower[2]), SCALE_ACTIVE_POW);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Active_Intan);   //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint64_2int64(Buff_IntanPower[3]), SCALE_ACTIVE_POW);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Active_Intan);    //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    //Công suat phan kháng pha A, B, C, tong.
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint64_2int64(Buff_IntanPower[4]), SCALE_REACTIVE_POW);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Reactive_Intan);    //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint64_2int64(Buff_IntanPower[5]), SCALE_REACTIVE_POW);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Reactive_Intan);    //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint64_2int64(Buff_IntanPower[6]), SCALE_REACTIVE_POW);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Reactive_Intan);   //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint64_2int64(Buff_IntanPower[7]), SCALE_REACTIVE_POW);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Reactive_Intan);    //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    //Tan so
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint16_2int16((uint16_t)Buff_IntanValue[8]), SCALE_FREQ);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Freq);    //don vi
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+//    // CÔng suat bieu kien pha A, B, C, Tong.
+//    
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanPower[8]), SCALE_APPRENT_POW);
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+//    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Apprent_Intan);    //don vi
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+//    
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanPower[9]), SCALE_APPRENT_POW);
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+//    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Apprent_Intan);   //don vi
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+//    
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanPower[10]), SCALE_APPRENT_POW);
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+//    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Apprent_Intan);   //don vi
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+//    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, Convert_uint_2int(Buff_IntanPower[11]), SCALE_APPRENT_POW);
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+//    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Apprent_Intan);   //don vi
+//    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    //Nang luong tich luy tác dung giao: tong biue 1 2 3
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.EnergTo.ImportActive, SCALE_TOTAL_ENERGY);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Active_EnTotal);  
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    if(Met_Var.ActiveEnerPlus.Flag_get_Ok == 1)
+    {
+        for(i = 0; i < Met_Var.ActiveEnerPlus.NumRate; i++)
+        {
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+            Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.ActiveEnerPlus.Rate[i], SCALE_TARRIFF); 
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+            Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Active_EnTotal);  
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+        }
+    }
+    //Nang luong tich luy tác dung nhan: tong biue 1 2 3
+   *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.EnergTo.EXportActive, SCALE_TOTAL_ENERGY);   
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Active_EnTotal);  
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    if(Met_Var.ActiveEnerSub.Flag_get_Ok == 1)
+    {
+        for(i = 0; i < Met_Var.ActiveEnerSub.NumRate; i++)
+        {
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+            Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.ActiveEnerSub.Rate[i], SCALE_TARRIFF);  
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+            Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Active_EnTotal);  
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';;
+        }
+    }
+    //Nang luong tich luy phan khang tong giao
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.EnergTo.ImportReactive, SCALE_TOTAL_ENERGY); 
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Reactive_EnTotal);  
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    //Nang luong tich luy phan khang tong nhan
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.EnergTo.EXportReative, SCALE_TOTAL_ENERGY); 
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_Reactive_EnTotal);  
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    //gia tri thanh ghi maxdemand
+    if(Met_Var.Flag_Get_MaxDemand_Ok == 1)
+    {
+        if(Met_Var.MaxDemndPlusRate.NumRate > 3) Met_Var.MaxDemndPlusRate.NumRate = 3;
+        
+        for(i = 0; i < Met_Var.MaxDemndPlusRate.NumRate; i++)
+        {
+            //them các gia tri maxdemand vao
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+            Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.MaxDemndPlusRate.Rate[i].Value, SCALE_MAX_DEMAND);  
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '*';
+            Copy_String_2(&Met_Var.Str_Payload_TSVH, &Unit_MAXDEMAND);
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+            //convert time(uint32) sang stime RTC.
+            Epoch_to_date_time(&Met_Var.MaxDemndPlusRate.Rate[i].STimeMaxD, Met_Var.MaxDemndPlusRate.Rate[i].Time);
+            
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '('; 
+            Copy_String_STime(&Met_Var.Str_Payload_TSVH, Met_Var.MaxDemndPlusRate.Rate[i].STimeMaxD);
+            *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+        }
+    }
+    //
+//    Copy_String_2(&Met_Var.Str_Payload_TSVH, &Buff_DaEvent); 
+    //
+    //Ti.		
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.Ti_Primary, SCALE_TU_TI); 
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '/';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.Ti_Second, SCALE_TU_TI); 
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    //Tu.	
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.Tu_Primary, SCALE_TU_TI);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '/';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.Tu_Second, SCALE_TU_TI); 
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    //he so nhan	
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Payload_TSVH, (int64_t) Met_Var.He_So_Nhan, SCALE_TU_TI); 
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ')';
+    
+    //ETX
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = ETX; 
+    //BBC
+    Temp_BBC = BBC_Cacul(Met_Var.Str_Payload_TSVH.Data_a8 + 1,Met_Var.Str_Payload_TSVH.Length_u16 - 1);
+    *(Met_Var.Str_Payload_TSVH.Data_a8 + Met_Var.Str_Payload_TSVH.Length_u16++) = Temp_BBC;
+    
+    //Neu ban tin qua 1024 byte thi cat thanh 2 ban tin
+    if(Met_Var.Str_Payload_TSVH.Length_u16 > 1000)
+    {
+        for(i = 1000; i < Met_Var.Str_Payload_TSVH.Length_u16; i++)
+        {
+            *(Met_Var.Str_Payload_TSVH_2.Data_a8 + Met_Var.Str_Payload_TSVH_2.Length_u16++) = *(Met_Var.Str_Payload_TSVH.Data_a8 + i);
+        }
+        Met_Var.Str_Payload_TSVH.Length_u16 = 1000;
+    }
+    
+    return 1;
+}
+
+
+
+
+void Class_Tariff_Chot (void)
+{
+    uint8_t i = 0;
+    uint8_t j = 0;
+    
+    //Clear data Tariff cua cac dai luong ve 0;
+    Clear_OldData_Tariff(&LastBill.ActiveEnerPlus);
+    Clear_OldData_Tariff(&LastBill.ActiveEnerSub);
+    Clear_OldData_Tariff(&LastBill.ReacEnerPlus);
+    Clear_OldData_Tariff(&LastBill.ReacEnerSub);;   
+    
+    for(i =0; i < 4; i++)
+      for(j= 0; j < 8; j++)
+      {
+        switch (LastBill.Tariff_G[i][j].Source)
+        {
+            case 0x01:  //Active Energy plus
+                LastBill.ActiveEnerPlus.Rate[LastBill.ActiveEnerPlus.NumRate++] = LastBill.Tariff_G[i][j].Value;
+                LastBill.ActiveEnerPlus.Flag_get_Ok = 1;
+                break;
+            case 0x02:  //Active Energy Sub 
+                LastBill.ActiveEnerSub.Rate[LastBill.ActiveEnerSub.NumRate++] = LastBill.Tariff_G[i][j].Value;
+                LastBill.ActiveEnerSub.Flag_get_Ok = 1;
+                break;
+            case 0x18:  //Reactive Energy plus  
+                LastBill.ReacEnerPlus.Rate[LastBill.ReacEnerPlus.NumRate++] = LastBill.Tariff_G[i][j].Value;
+                LastBill.ReacEnerPlus.Flag_get_Ok = 1;
+                break;
+            case 0x60:   //Reactive Energy Sub
+                LastBill.ReacEnerSub.Rate[LastBill.ReacEnerSub.NumRate++] = LastBill.Tariff_G[i][j].Value;
+                LastBill.ReacEnerSub.Flag_get_Ok = 1;
+                break;
+            default:
+                break;
+        }
+      }
+}
+
+//Dóng goi ban tin chot
+
+uint8_t Pack_PushData_103_Chot (void)  //LastBill
+{ 
+    uint16_t  i = 0;
+    uint16_t PosNumqty = 0;
+    uint16_t Countqty = 0;
+    uint8_t BuffnumqtyDec[4];
+    truct_String StrDecNumqty = {&BuffnumqtyDec[0], 0};
+    uint8_t Temp_BBC = 0;
+  
+    if(Met_Var.Flag_Get_Chot_Ok == 0) 
+        return 0;
+    
+    Met_Var.Str_Payload_Bill.Data_a8 = &MeterBillingDataBuff[0];
+    Reset_Buff(&Met_Var.Str_Payload_Bill);
+    
+    Class_Tariff_Chot();
+    Class_MaxDemand(&LastBill.MaxDemndPlusRate, &LastBill.MaxDemndSubRate, &LastBill.MaxDemand_G[0]);
+    
+    //STX
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = STX;
+    //obiscode Intan
+    Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_OB_CHOT);
+        
+    //DCUID
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+    Copy_String_2(&Met_Var.Str_Payload_Bill, &sDCU.sDCU_id); 
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+    
+    //ID Meter
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+    Copy_String_2(&Met_Var.Str_Payload_Bill, &sDCU.sMeter_id_now);  
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+    
+    //Meter type
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+    Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_MeterType_u8[sDCU.MeterType]);  
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+    
+    //Timlabel
+    //convert time(uint32) sang stime RTC.
+    Epoch_to_date_time(&LastBill.sTimeRTC_LastBill, LastBill.sTime);
+        
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '('; 
+    Copy_String_STime(&Met_Var.Str_Payload_Bill,LastBill.sTimeRTC_LastBill);
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+    
+    //numqty
+    PosNumqty = Met_Var.Str_Payload_Bill.Length_u16;
+     
+    //them các gia tri thanh ghi dien nang tong vao  
+    
+    if(Met_Var.Flag_Get_Chot_Ok == 1)
+    {  
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_AcImTotal_Chot); 
+        Countqty++;
+        if(LastBill.ActiveEnerSub.Flag_get_Ok == 1)
+        {
+            for(i = 0; i < LastBill.ActiveEnerPlus.NumRate; i++)
+            {
+              if(i == 0) Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_AcPlus_Rate1_chot);
+              else if(i == 1) Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_AcPlus_Rate2_chot);
+              else if(i == 2) Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_AcPlus_Rate3_chot);
+              else break;
+              Countqty++;
+            }
+        }
+        
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_AcExTotal_Chot);
+        Countqty++;
+            
+        if(LastBill.ActiveEnerSub.Flag_get_Ok == 1)
+        {
+            
+            for(i = 0; i < LastBill.ActiveEnerSub.NumRate; i++)
+            {
+              if(i == 0) Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_AcSub_Rate1_chot);
+              else if(i == 1) Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_AcSub_Rate2_chot);
+              else if(i == 2) Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_AcSub_Rate3_chot);
+              else break;
+              Countqty++;
+            }
+        }
+        
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_ReImTotal_Chot); 
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_ReExTotal_Chot); 
+        Countqty += 2;
+    
+        //them các gia tri maxdemand vao 
+        if(LastBill.MaxDemndPlusRate.Flag_get_Ok == 1)
+        {
+            if(LastBill.MaxDemndPlusRate.NumRate > 3) LastBill.MaxDemndPlusRate.NumRate = 3;
+            
+            for(i = 0; i < LastBill.MaxDemndPlusRate.NumRate; i++)
+            {
+                if(i == 0)
+                    Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_MaxDeRate1_Chot);  
+                if(i == 1)
+                    Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_MaxDeRate2_Chot);
+                if(i == 2)
+                    Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_MaxDeRate3_Chot); 
+                
+                Countqty++;
+            }
+        }
+        
+        if(LastBill.MaxDemndPlusRate.Flag_get_Ok == 1)
+        {
+            if(LastBill.MaxDemndSubRate.NumRate > 3) LastBill.MaxDemndSubRate.NumRate = 3;
+            
+            for(i = 0; i < LastBill.MaxDemndSubRate.NumRate; i++)
+            {
+                if(i == 0)
+                    Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_MaxDe2Rate1_Chot); 
+                if(i == 1)
+                    Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_MaxDe2Rate2_Chot);
+                if(i == 2)
+                    Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_MaxDe2Rate3_Chot);
+                
+                Countqty++;
+            }
+        }
+    }
+    
+    
+    if(Met_Var.Flag_Get_Chot_Ok == 1)
+    {   
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_Ti);  
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &Str_Ob_Tu);        
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &He_So_Nhan);
+        Countqty+=3;
+    }
+    
+    ConvertHexDatatoStringDec(Countqty, &StrDecNumqty);
+    //dich buff tu vi tri PosNumqty sang phia sau. de lay cho ghep numqty vao.
+    for(i = 0 ; i < (Met_Var.Str_Payload_Bill.Length_u16 - PosNumqty); i++)
+    {
+        *(Met_Var.Str_Payload_Bill.Data_a8 + (Met_Var.Str_Payload_Bill.Length_u16 - 1 - i)+ (StrDecNumqty.Length_u16 + 2)) = *(Met_Var.Str_Payload_Bill.Data_a8 + (Met_Var.Str_Payload_Bill.Length_u16 - 1 - i));
+    }
+    Met_Var.Str_Payload_Bill.Length_u16 += (StrDecNumqty.Length_u16 + 2);
+    
+    //ghi lai numqty
+    
+    *(Met_Var.Str_Payload_Bill.Data_a8 + PosNumqty) = '(';
+    for(i = 0; i < StrDecNumqty.Length_u16; i++)
+    {
+        *(Met_Var.Str_Payload_Bill.Data_a8 + PosNumqty + i + 1) = *(StrDecNumqty.Data_a8 + i);
+    }
+    *(Met_Var.Str_Payload_Bill.Data_a8 + PosNumqty + i + 1) = ')';  
+    //them \r\n
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = 0x0D;
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = 0x0A;
+    
+    //ghi data lan luot vao
+    if(Met_Var.Flag_Get_Chot_Ok == 1)
+    { 
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+        Pack_HEXData_Frame_Uint64(&Met_Var.Str_Payload_Bill, LastBill.E_Regis_Total.ImportActive, SCALE_TOTAL_ENERGY);
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '*';
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &Unit_Active_EnTotal);  
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+            
+        if(LastBill.ActiveEnerPlus.Flag_get_Ok == 1)
+        {
+            for(i = 0; i < LastBill.ActiveEnerPlus.NumRate; i++)
+            {
+                *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+                Pack_HEXData_Frame(&Met_Var.Str_Payload_Bill, (int64_t) LastBill.ActiveEnerPlus.Rate[i], SCALE_TARRIFF); 
+                *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '*';
+                Copy_String_2(&Met_Var.Str_Payload_Bill, &Unit_Active_EnTotal);  
+                *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+            }
+        }
+        
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+        Pack_HEXData_Frame_Uint64(&Met_Var.Str_Payload_Bill, LastBill.E_Regis_Total.EXportActive, SCALE_TOTAL_ENERGY);   
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '*';
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &Unit_Active_EnTotal);  
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+        
+        if(LastBill.ActiveEnerSub.Flag_get_Ok == 1)
+        {
+            for(i = 0; i < LastBill.ActiveEnerSub.NumRate; i++)
+            {
+                *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+                Pack_HEXData_Frame(&Met_Var.Str_Payload_Bill, (int64_t) LastBill.ActiveEnerSub.Rate[i], SCALE_TARRIFF);  
+                *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '*';
+                Copy_String_2(&Met_Var.Str_Payload_Bill, &Unit_Active_EnTotal);  
+                *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';;
+            }
+        }
+        
+         *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+        Pack_HEXData_Frame_Uint64(&Met_Var.Str_Payload_Bill, LastBill.E_Regis_Total.ImportReactive, SCALE_TOTAL_ENERGY); 
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '*';
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &Unit_Reactive_EnTotal);  
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+        
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+        Pack_HEXData_Frame_Uint64(&Met_Var.Str_Payload_Bill, LastBill.E_Regis_Total.EXportReative, SCALE_TOTAL_ENERGY); 
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '*';
+        Copy_String_2(&Met_Var.Str_Payload_Bill, &Unit_Reactive_EnTotal);  
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+        
+        
+        //them các gia tri maxdemand vao
+        
+        if(LastBill.MaxDemndPlusRate.NumRate > 3) LastBill.MaxDemndPlusRate.NumRate = 3;
+        
+        for(i = 0; i < LastBill.MaxDemndPlusRate.NumRate; i++)
+        {
+            *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+            Pack_HEXData_Frame(&Met_Var.Str_Payload_Bill, (int64_t) LastBill.MaxDemndPlusRate.Rate[i].Value, SCALE_MAX_DEMAND);  
+            *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '*';
+            Copy_String_2(&Met_Var.Str_Payload_Bill, &Unit_MAXDEMAND);
+            *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+            //convert time(uint32) sang stime RTC.
+            Epoch_to_date_time(&LastBill.MaxDemndPlusRate.Rate[i].STimeMaxD, LastBill.MaxDemndPlusRate.Rate[i].Time);
+            
+            *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '('; 
+            Copy_String_STime(&Met_Var.Str_Payload_Bill, LastBill.MaxDemndPlusRate.Rate[i].STimeMaxD);
+            *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+        }  
+        
+         if(LastBill.MaxDemndSubRate.NumRate > 3) LastBill.MaxDemndSubRate.NumRate = 3;
+        
+        for(i = 0; i < LastBill.MaxDemndSubRate.NumRate; i++)
+        {
+            *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+            Pack_HEXData_Frame(&Met_Var.Str_Payload_Bill, (int64_t) LastBill.MaxDemndSubRate.Rate[i].Value, SCALE_MAX_DEMAND);  
+            *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '*';
+            Copy_String_2(&Met_Var.Str_Payload_Bill, &Unit_MAXDEMAND);
+            *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+            //convert time(uint32) sang stime RTC.
+            Epoch_to_date_time(&LastBill.MaxDemndSubRate.Rate[i].STimeMaxD, LastBill.MaxDemndSubRate.Rate[i].Time);
+            
+            *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '('; 
+            Copy_String_STime(&Met_Var.Str_Payload_Bill, LastBill.MaxDemndSubRate.Rate[i].STimeMaxD);
+            *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+        } 
+    }
+    
+    if(Met_Var.Flag_Get_Chot_Ok == 1)
+    {
+        //Ti.		
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+        Pack_HEXData_Frame(&Met_Var.Str_Payload_Bill, (int64_t) Met_Var.Ti_Primary, SCALE_TU_TI); 
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '/';
+        Pack_HEXData_Frame(&Met_Var.Str_Payload_Bill, (int64_t) Met_Var.Ti_Second, SCALE_TU_TI); 
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+        
+        //Tu.	
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+        Pack_HEXData_Frame(&Met_Var.Str_Payload_Bill, (int64_t) Met_Var.Tu_Primary, SCALE_TU_TI);
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '/';
+        Pack_HEXData_Frame(&Met_Var.Str_Payload_Bill, (int64_t) Met_Var.Tu_Second, SCALE_TU_TI); 
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+        
+        //he so nhan	
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = '(';
+        Pack_HEXData_Frame(&Met_Var.Str_Payload_Bill, (int64_t) Met_Var.He_So_Nhan, SCALE_TU_TI); 
+        *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ')';
+    }
+        
+    //ETX
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = ETX; 
+    //BBC
+    Temp_BBC = BBC_Cacul(Met_Var.Str_Payload_Bill.Data_a8 + 1,Met_Var.Str_Payload_Bill.Length_u16 - 1);
+    *(Met_Var.Str_Payload_Bill.Data_a8 + Met_Var.Str_Payload_Bill.Length_u16++) = Temp_BBC;
+    
+    return 1;
+}
+
+
+//Dong goi ban tin Event theo 103. lay event phai lay stime truoc.
+uint8_t Pack_PushData_103_Event (truct_String* Payload)  
+{
+    uint8_t Temp_BBC = 0;
+    uint16_t  i = 0;
+    
+    
+    Reset_Buff(Payload);
+    
+    //STX
+    *(Payload->Data_a8 + Payload->Length_u16++) = STX;
+    //obiscode Intan
+    Copy_String_2(Payload, &Str_OB_EVENT);
+        
+    //DCUID
+    *(Payload->Data_a8 + Payload->Length_u16++) = '(';
+    Copy_String_2(Payload, &sDCU.sDCU_id); 
+    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+    
+    //ID Meter
+    *(Payload->Data_a8 + Payload->Length_u16++) = '(';
+    Copy_String_2(Payload, &sDCU.sMeter_id_now); 
+    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+    
+    //Meter type
+    *(Payload->Data_a8 + Payload->Length_u16++) = '(';
+    Copy_String_2(Payload, &Str_MeterType_u8[sDCU.MeterType]);  
+    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+    
+    //Timlabel
+    *(Payload->Data_a8 + Payload->Length_u16++) = '('; 
+    Copy_String_STime(Payload,Met_Var.STimeIntan);
+    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+    
+    Get_Event_Meter.Pos_Numqty = Payload->Length_u16;
+    //number su kien
+//    *(Payload->Data_a8 + Payload->Length_u16++) = '('; 
+//    Copy_String_STime(Payload,Met_Var.STimeIntan);
+//    *(Payload->Data_a8 + Payload->Length_u16++) = ')';
+    
+    Get_Event_Meter.Pos_Obis = Payload->Length_u16;
+    
+    *(Payload->Data_a8 + Payload->Length_u16++) = 0x0D; 
+    *(Payload->Data_a8 + Payload->Length_u16++) = 0x0A;
+    Get_Event_Meter.Pos_Data = Payload->Length_u16;
+    //sau do la obis va data
+    
+    for(i = 0; i < 29; i++)
+    {
+        if(Str_Ob_Event[Met_Var.Event[i].Source].StartCountOB != NULL)
+        {
+            //ghi obis count vao
+            Copy_String_toTaget(&Get_Meter_LProf.Str_Payload, Get_Meter_LProf.Pos_Obis_Inbuff, Obis_Gelex_Ins[TempObis].StrObis_Lpf);
+            Get_Meter_LProf.Pos_Obis_Inbuff += Obis_Gelex_Ins[TempObis].StrObis_Lpf->Length_u16;
+            Get_Meter_LProf.Pos_Data_Inbuff = Get_Meter_LProf.Str_Payload.Length_u16;
+            Met_Var.Event[i].Total
+        }
+        Met_Var.Event[i].Source
+        
+        Met_Var.Event[i].Time[0].TimeStartRTC = ;
+        
+    }
+    
+    //ETX
+    *(Payload->Data_a8 + Payload->Length_u16++) = ETX; 
+    //BBC
+    Temp_BBC = BBC_Cacul(Payload->Data_a8 + 1,Payload->Length_u16 - 1);
+    *(Payload->Data_a8 + Payload->Length_u16++) = Temp_BBC;
+    return 1;
+}
+
+
+
+
+void Pack_PushData_103_Infor_Meter (void)
+{ 
+    uint8_t Temp_BBC = 0;
+    
+    Met_Var.Str_Infor_Meter.Data_a8 = &InfoMeterBuff[0];
+    Reset_Buff(&Met_Var.Str_Infor_Meter);
+      
+    //STX
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = STX;
+    //obiscode Intan
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &Str_OB_INFOR_METER);
+
+    //DCUID
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '(';
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &sDCU.sDCU_id); 
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+    
+    //ID Meter
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '(';
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &sDCU.sMeter_id_now);  
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+
+    //Meter type
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '(';
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &Str_MeterType_u8[sDCU.MeterType]);  
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+    
+    //Timlabel
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '('; 
+    Copy_String_STime(&Met_Var.Str_Infor_Meter,Met_Var.STimeIntan);
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+    //numqty
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '('; 
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '6'; 
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+    
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &ModermIP); 
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &ModermFirmVer); 
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &ModermCSQ); 
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &Str_Ob_Ti);  
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &Str_Ob_Tu);        
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &He_So_Nhan); 
+    
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = 0x0D;
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = 0x0A;
+    
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '('; 
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &sDCU.Str_IP_Module);
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+    
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '('; 
+    Copy_String_2(&Met_Var.Str_Infor_Meter, &sFirmware_Version);
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+    
+    
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '('; 
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = 'C';
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = 'S';
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = 'Q';
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '-';
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = (sSim900_status.RSSI_c8>>4) + 0x30;;
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = (sSim900_status.RSSI_c8&0x0F) + 0x30;;
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+    
+    //Ti.		
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Infor_Meter, (int64_t) Met_Var.Ti_Primary, SCALE_TU_TI); 
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '/';
+    Pack_HEXData_Frame(&Met_Var.Str_Infor_Meter, (int64_t) Met_Var.Ti_Second, SCALE_TU_TI); 
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+    
+    //Tu.	
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Infor_Meter, (int64_t) Met_Var.Tu_Primary, SCALE_TU_TI);
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '/';
+    Pack_HEXData_Frame(&Met_Var.Str_Infor_Meter, (int64_t) Met_Var.Tu_Second, SCALE_TU_TI); 
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+    
+    //he so nhan	
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = '(';
+    Pack_HEXData_Frame(&Met_Var.Str_Infor_Meter, (int64_t) Met_Var.He_So_Nhan, SCALE_TU_TI); 
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ')';
+    
+    //ETX
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = ETX; 
+    //BBC
+    Temp_BBC = BBC_Cacul(Met_Var.Str_Infor_Meter.Data_a8 + 1,Met_Var.Str_Infor_Meter.Length_u16 - 1);
+    *(Met_Var.Str_Infor_Meter.Data_a8 + Met_Var.Str_Infor_Meter.Length_u16++) = Temp_BBC;
+}
+
+
+uint8_t CPC_Read_Event (void)
+{
+    if (CPC_Handshake_Handle() == 1)
+    {
+        if(Function_Get_Stime()== 1)
+        {
+            if(Function_Get_TuTi() == 1)
+            {
+                if(Function_Get_Event() == 1)
+                {
+                    Met_Var.Str_Payload_Event.Data_a8 = &MeterEventDataBuff[0];
+                    Reset_Buff(&Met_Var.Str_Payload_Event);
+                    Inin_Struct_GetEvent();
+                    //dong goi event
+                    Pack_PushData_103_Event(&Met_Var.Str_Payload_Event);
+                    //send to queue
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+
+

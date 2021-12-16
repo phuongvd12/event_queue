@@ -1,0 +1,2 @@
+S25FL.c:13:6:Flash_S25FL_ChipSelect	24	static
+S25FL.c:27:9:Flash_S25FL_Send_Byte	32	static

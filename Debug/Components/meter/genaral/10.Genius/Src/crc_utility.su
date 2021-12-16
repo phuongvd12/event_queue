@@ -1,0 +1,3 @@
+crc_utility.c:22:10:crc_calcCcittXmodem	24	static
+crc_utility.c:36:9:gencrc_16	24	static
+crc_utility.c:54:10:CalculateCharacterCRC16	24	static

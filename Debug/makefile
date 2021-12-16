@@ -9,14 +9,23 @@ RM := rm -rf
 
 # All of the sources participating in the build are defined here
 -include sources.mk
--include sim_module/subdir.mk
--include queue/subdir.mk
--include meter/subdir.mk
--include EventDriven/subdir.mk
 -include Drivers/STM32L4xx_HAL_Driver/Src/subdir.mk
 -include Core/Startup/subdir.mk
 -include Core/Src/subdir.mk
--include App/subdir.mk
+-include Components/sub_event/subdir.mk
+-include Components/sim_module/subdir.mk
+-include Components/queue/subdir.mk
+-include Components/meter/genaral/Src/subdir.mk
+-include Components/meter/genaral/CPC_Lib/src/subdir.mk
+-include Components/meter/genaral/4.Landis/Src/subdir.mk
+-include Components/meter/genaral/3.Gelex/Src/subdir.mk
+-include Components/meter/genaral/12.Meter103/Src/subdir.mk
+-include Components/meter/genaral/11.Start/Src/subdir.mk
+-include Components/meter/genaral/10.Genius/Src/subdir.mk
+-include Components/meter/genaral/1.Elster/Src/subdir.mk
+-include Components/meter/subdir.mk
+-include Components/flash_ext/subdir.mk
+-include Components/App/subdir.mk
 -include subdir.mk
 -include objects.mk
 
