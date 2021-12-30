@@ -54,9 +54,11 @@ Core/Src/stm32l4xx_it.o: ../Core/Src/stm32l4xx_it.c ../Core/Inc/main.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/meter_test.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/genaral/Inc/myUart.h \
  ../Core/Src/../../Components/sub_event/event_driven.h \
+ D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/flash_ext/flash_ext.h \
+ D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sub_event/myDefine.h \
+ D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sub_event/event_driven.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/queue/queue_p.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/flash_ext/S25FL.h \
- D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sub_event/myDefine.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/genaral/1.Elster/Inc/ELSTER_Read_Meter.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/genaral/Inc/myuart.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/genaral/Inc/sim900.h \
@@ -178,11 +180,15 @@ D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/genaral/Inc/myUart
 
 ../Core/Src/../../Components/sub_event/event_driven.h:
 
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/flash_ext/flash_ext.h:
+
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sub_event/myDefine.h:
+
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sub_event/event_driven.h:
+
 D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/queue/queue_p.h:
 
 D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/flash_ext/S25FL.h:
-
-D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sub_event/myDefine.h:
 
 D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/genaral/1.Elster/Inc/ELSTER_Read_Meter.h:
 

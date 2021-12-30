@@ -52,6 +52,8 @@ Components/flash_ext/S25FL.o: ../Components/flash_ext/S25FL.c \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/meter_test.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/genaral/Inc/myUart.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sub_event/event_driven.h \
+ D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/flash_ext/flash_ext.h \
+ D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sub_event/event_driven.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/queue/queue_p.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/flash_ext/S25FL.h \
  D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/genaral/Inc/Init_All_Meter.h \
@@ -169,6 +171,10 @@ D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sim_module/sim_command.h
 D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/meter_test.h:
 
 D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/meter/genaral/Inc/myUart.h:
+
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sub_event/event_driven.h:
+
+D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/flash_ext/flash_ext.h:
 
 D:/Embedded/DCU/2021/PhuongNov21/event_queue/Components/sub_event/event_driven.h:
 

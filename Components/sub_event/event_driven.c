@@ -25,7 +25,7 @@ static uint8_t fEvent_collect_handler(uint8_t event);
 sEvent_struct s_event_sub_handler[] =
 {
 	{ EVENT_SUB_BLINK_LED1, 		1, 0, 1000, 	fEvent_blink_led1_handler},
-	{ EVENT_SUB_BLINK_LED2, 		1, 1, 20000, 	fEvent_blink_led2_handler},
+	{ EVENT_SUB_BLINK_LED2, 		1, 1, 5000, 	fEvent_blink_led2_handler},
 	{ EVENT_SUB_BLINK_LED3, 		0, 0, 1000, 	fEvent_blink_led3_handler},
 	{ EVENT_SUB_PRINT_DEBUG, 		0, 0, 10, 		fEvent_print_debug_handler},
 	{ EVENT_SUB_COLLECT_DATA, 		1, 0, 180000, 	fEvent_collect_handler},
@@ -100,7 +100,7 @@ static uint8_t fEvent_blink_led1_handler(uint8_t event)
 static uint8_t fEvent_blink_led2_handler(uint8_t event)
 {
 	HAL_GPIO_TogglePin(PB13_GPIO_Port, PB13_Pin);
-	Meter_PushToQueueToSend(M_MESSAGE_OPEATION);
+//	Meter_PushToQueueToSend(M_MESSAGE_OPEATION);
 //	HAL_IWDG_Refresh(&hiwdg);
 	return 1;
 }

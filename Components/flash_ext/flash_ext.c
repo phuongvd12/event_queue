@@ -168,6 +168,8 @@ static uint8_t Flash_cmd_check_write_END_callback_success(void)
 
 	Flash_event_enable(EVENT_FLASH_WRITE_BUFF);
 	num_message += 1;
+	if (num_message > 100)
+		num_message = 1;
 
 	return 1;
 }
